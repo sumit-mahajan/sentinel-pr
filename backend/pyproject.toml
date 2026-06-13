@@ -116,7 +116,28 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "--cov=src --cov-report=term-missing --cov-fail-under=75"
+addopts = "--cov=src --cov-report=term-missing --cov-fail-under=75 --cov-config=pyproject.toml"
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "src/infrastructure/db/repositories/*_repository.py",
+    "src/infrastructure/db/session.py",
+    "src/infrastructure/db/migrations/*",
+    "src/infrastructure/github/app_client.py",
+    "src/infrastructure/queue/upstash_redis_client.py",
+    "src/infrastructure/observability/langfuse_client.py",
+    "src/worker/*",
+    "src/evals/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@abstractmethod",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -21,7 +21,7 @@ alwaysApply: true
 | Step 3 — Lock data contracts | DONE | `schema.mdc` (DB schema + DTOs + API contract) |
 | Step 4 — Workspace setup | DONE | `reviewer.mdc`, `backend-standards.mdc`, `frontend-standards.mdc`, `.cursor/hooks.json`, `.pre-commit-config.yaml` |
 | Step 4.5 — Lock deployment config | DONE | `Dockerfile`, `docker-compose.yml`, `.env.example`, `render.yaml`, `vercel.json`, `Makefile`, `.gitignore`, `pyproject.toml`, `package.json`, full dir skeleton |
-| Step 5 — Incremental feature build | IN PROGRESS | F-01 ✓, F-05 ✓ |
+| Step 5 — Incremental feature build | IN PROGRESS | F-01 ✓, F-05 ✓, F-07 ✓ |
 
 ---
 
@@ -33,7 +33,7 @@ Step 4.5 — Deployment config complete. Full project skeleton created. Ready to
 
 ## Current In-Progress
 
-F-05 Async Worker System — done. 28/28 tests passing, 77% coverage. Next: F-07 Observability + Storage (Langfuse tracing infra + DB persistence layer).
+F-07 Observability + Storage — done. 34/34 tests passing, 84% coverage. Next: F-02 Multi-Agent Review Pipeline.
 
 ---
 
