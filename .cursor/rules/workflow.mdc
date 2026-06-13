@@ -171,18 +171,39 @@ Never batch across architectural boundaries.
 
 ---
 
+## Commit Policy
+
+**Never run `git commit` unless the user explicitly asks.**
+
+Finishing a task, passing tests, or updating `session-state.mdc` does **not** authorize a
+commit. When work is done but the user has not asked to commit:
+
+1. Summarize what changed
+2. Tell the user changes are uncommitted and ready for review
+3. Wait for explicit approval
+
+Commit only when the user clearly requests it — e.g. "commit", "commit this", "proceed",
+"proceed to next", or "continue" in the Proceed Protocol sense below.
+
+Commit message format: `feat: <feature-id> <short description>` (e.g. `feat: F-05 async worker system`).
+Use `chore:` for setup/config steps (e.g. `chore: Step 4.5 deployment config`).
+Use `fix:` for bug fixes. One logical change per commit.
+
+---
+
 ## Proceed Protocol
 
-When the user says "proceed", "proceed to next", "continue", or any equivalent:
+When the user says "proceed", "proceed to next", or "continue" **meaning advance to the
+next build step**:
 
-1. **Commit first** — stage all changed files and create a commit with a clear message
-   describing what was just completed (e.g. `feat: F-01 GitHub App webhook integration`).
+1. **Commit first** — only if there are uncommitted changes from the step just completed.
+   Stage and commit with a clear message (see Commit Policy above).
    Do not start the next step until the commit succeeds.
 2. **Then start the next step** — begin immediately after the commit, without waiting for
    additional confirmation.
 
-Commit message format: `feat: <feature-id> <short description>` (e.g. `feat: F-05 async worker system`).
-Use `chore:` for setup/config steps (e.g. `chore: Step 4.5 deployment config`).
+If the user says "continue" while reviewing or discussing (not advancing the build),
+do **not** commit — ask what they want to do next.
 
 ---
 
