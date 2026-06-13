@@ -13,6 +13,7 @@ from application.use_cases.assemble_review_package import AssembleReviewPackageU
 from domain.repositories.i_job_repository import IJobRepository
 from domain.services.i_agent_orchestrator import IAgentOrchestrator, OrchestratorResult
 from domain.value_objects.agent_type import AgentType
+from domain.value_objects.review_finding import ReviewFinding
 from infrastructure.ai.agents.arch_agent import ArchAgent
 from infrastructure.ai.agents.perf_agent import PerfAgent
 from infrastructure.ai.agents.security_agent import SecurityAgent
@@ -136,4 +137,23 @@ class LanggraphOrchestrator(IAgentOrchestrator):
             agents_run=agents_run,
             total_findings=len(findings),
             langfuse_trace_id=trace_id,
+            summary=final_state.get("summary"),
+            findings=tuple(_to_review_findings(findings)),
         )
+
+
+def _to_review_findings(findings: list) -> list[ReviewFinding]:
+    return [
+        ReviewFinding(
+            severity=f.severity,
+            category=f.category,
+            agent_source=f.agent_source,
+            file_path=f.file_path,
+            line_start=f.line_start,
+            line_end=f.line_end,
+            title=f.title,
+            description=f.description,
+            fix_suggestion=f.fix_suggestion,
+        )
+        for f in findings
+    ]

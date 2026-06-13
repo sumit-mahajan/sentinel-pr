@@ -56,3 +56,9 @@ class IReviewRepository(ABC):
     @abstractmethod
     async def mark_posted_to_github(self, review_id: UUID) -> Review:
         """Set posted_to_github = True after comments are published."""
+
+    @abstractmethod
+    async def update_finding_comment_ids(
+        self, updates: list[tuple[UUID, int]]
+    ) -> None:
+        """Persist GitHub comment IDs returned after posting inline comments."""

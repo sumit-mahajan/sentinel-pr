@@ -119,6 +119,16 @@ class PostgresReviewRepository(IReviewRepository):
         findings = await self._load_findings(review_id)
         return _to_review_entity(orm, findings)
 
+    async def update_finding_comment_ids(
+        self, updates: list[tuple[UUID, int]]
+    ) -> None:
+        for finding_id, comment_id in updates:
+            orm = await self._session.get(FindingORM, finding_id)
+            if orm is None:
+                continue
+            orm.github_comment_id = comment_id
+        await self._session.commit()
+
     async def _load_findings(self, review_id: UUID) -> list[FindingORM]:
         result = await self._session.execute(
             select(FindingORM).where(FindingORM.review_id == review_id)

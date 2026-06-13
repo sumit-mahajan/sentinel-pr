@@ -3,15 +3,19 @@ RunReviewPipelineUseCase — orchestrates a single review job end-to-end.
 
 Execution order:
   1. Mark job RUNNING
-  2. Call IAgentOrchestrator (F-02 implements the real pipeline)
-  3. Persist results in DB (F-07 adds Langfuse trace fields)
-  4. Mark job COMPLETED
+  2. Skip if review already persisted and posted (idempotent retry)
+  3. Call IAgentOrchestrator (F-02 implements the real pipeline)
+  4. Persist results in DB (F-04)
+  5. Post review to GitHub (F-04)
+  6. Mark job COMPLETED
   On any exception: increment attempt_count, mark FAILED with error_message.
 """
 from uuid import UUID
 
 import structlog
 
+from application.use_cases.persist_review import PersistReviewUseCase
+from application.use_cases.post_review_to_github import PostReviewToGithubUseCase
 from domain.errors import ApplicationError
 from domain.repositories.i_job_repository import IJobRepository
 from domain.services.i_agent_orchestrator import IAgentOrchestrator
@@ -27,9 +31,13 @@ class RunReviewPipelineUseCase:
         self,
         job_repo: IJobRepository,
         orchestrator: IAgentOrchestrator,
+        persist_review: PersistReviewUseCase | None = None,
+        post_to_github: PostReviewToGithubUseCase | None = None,
     ) -> None:
         self._job_repo = job_repo
         self._orchestrator = orchestrator
+        self._persist_review = persist_review
+        self._post_to_github = post_to_github
 
     async def execute(self, job_id: UUID) -> bool:
         """Run the pipeline for the given job.
@@ -59,13 +67,37 @@ class RunReviewPipelineUseCase:
         await log.ainfo("worker_job_started")
 
         try:
-            result = await self._orchestrator.run(job_id)
+            existing_review = None
+            if self._persist_review is not None:
+                existing_review = await self._persist_review.get_existing(job_id)
+
+            if (
+                existing_review is not None
+                and existing_review.posted_to_github
+            ):
+                await self._job_repo.update_status(job_id, JobStatus.COMPLETED)
+                await log.ainfo("worker_job_idempotent_complete")
+                return True
+
+            if existing_review is None:
+                result = await self._orchestrator.run(job_id)
+                if self._persist_review is not None:
+                    existing_review = await self._persist_review.execute(job, result)
+                await log.ainfo(
+                    "worker_pipeline_finished",
+                    agents_run=[a.value for a in result.agents_run],
+                    total_findings=result.total_findings,
+                )
+
+            if (
+                existing_review is not None
+                and self._post_to_github is not None
+                and not existing_review.posted_to_github
+            ):
+                await self._post_to_github.execute(existing_review)
+
             await self._job_repo.update_status(job_id, JobStatus.COMPLETED)
-            await log.ainfo(
-                "worker_job_completed",
-                agents_run=[a.value for a in result.agents_run],
-                total_findings=result.total_findings,
-            )
+            await log.ainfo("worker_job_completed")
             return True
 
         except Exception as exc:  # noqa: BLE001

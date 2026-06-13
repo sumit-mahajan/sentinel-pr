@@ -104,6 +104,29 @@ class InMemoryReviewRepository(IReviewRepository):
         self._reviews[review_id] = updated
         return updated
 
+    async def update_finding_comment_ids(
+        self, updates: list[tuple[object, int]]
+    ) -> None:
+        for finding_id, comment_id in updates:
+            for review in self._reviews.values():
+                for i, finding in enumerate(review.findings):
+                    if finding.id == finding_id:
+                        review.findings[i] = Finding(
+                            id=finding.id,
+                            review_id=finding.review_id,
+                            severity=finding.severity,
+                            category=finding.category,
+                            agent_source=finding.agent_source,
+                            file_path=finding.file_path,
+                            line_start=finding.line_start,
+                            line_end=finding.line_end,
+                            title=finding.title,
+                            description=finding.description,
+                            fix_suggestion=finding.fix_suggestion,
+                            github_comment_id=comment_id,
+                            created_at=finding.created_at,
+                        )
+
 
 @pytest.mark.asyncio
 async def test_create_review_persists_findings() -> None:

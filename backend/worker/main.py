@@ -5,18 +5,23 @@ Run via: python -m worker.main
          docker-compose: command override (see docker-compose.yml)
 """
 import asyncio
-import json
 import signal
-import sys
 
 import structlog
 
 from application.use_cases.cleanup_embeddings import CleanupEmbeddingsUseCase
+from application.use_cases.persist_review import PersistReviewUseCase
+from application.use_cases.post_review_to_github import PostReviewToGithubUseCase
 from application.use_cases.run_review_pipeline import RunReviewPipelineUseCase
 from infrastructure.ai.stub_orchestrator import StubAgentOrchestrator
 from infrastructure.config.settings import get_settings
+from infrastructure.db.repositories.installation_repository import PostgresInstallationRepository
 from infrastructure.db.repositories.job_repository import PostgresJobRepository
+from infrastructure.db.repositories.repo_repository import PostgresRepoRepository
+from infrastructure.db.repositories.review_repository import PostgresReviewRepository
 from infrastructure.db.session import create_session_factory
+from infrastructure.github.app_client import GithubAppClient
+from infrastructure.github.comment_poster import GithubCommentPoster
 from infrastructure.worker.dispatcher import WorkerDispatcher
 
 logger = structlog.get_logger()
@@ -30,18 +35,42 @@ async def _make_dispatcher(settings: object) -> WorkerDispatcher:
     assert isinstance(settings, Settings)
 
     session_factory = create_session_factory(settings)
-    orchestrator = StubAgentOrchestrator()  # replaced by real pipeline in F-02
+    orchestrator = StubAgentOrchestrator()  # replaced by LanggraphOrchestrator when Gemini is configured
 
-    # Embedding cleanup needs a real DB session.
-    # We build a session per-job inside the dispatcher via closure.
-    # For now use a single long-lived session (replaced in F-07 with proper scoping).
     session = session_factory()
 
     async with session as db:
         job_repo = PostgresJobRepository(db)
-        run_review = RunReviewPipelineUseCase(job_repo, orchestrator)
+        review_repo = PostgresReviewRepository(db)
+        repo_repo = PostgresRepoRepository(db)
+        installation_repo = PostgresInstallationRepository(db)
 
-        # Embedding cleanup repo wired in F-03/F-07; stub here.
+        persist_review = PersistReviewUseCase(review_repo)
+        post_to_github: PostReviewToGithubUseCase | None = None
+
+        if settings.github_app_id and (
+            settings.github_app_private_key_b64 or settings.github_app_private_key_path
+        ):
+            app_client = GithubAppClient.from_settings(
+                app_id=settings.github_app_id,
+                private_key_b64=settings.github_app_private_key_b64,
+                private_key_path=settings.github_app_private_key_path,
+            )
+            comment_poster = GithubCommentPoster(app_client)
+            post_to_github = PostReviewToGithubUseCase(
+                review_repo,
+                repo_repo,
+                installation_repo,
+                comment_poster,
+            )
+
+        run_review = RunReviewPipelineUseCase(
+            job_repo,
+            orchestrator,
+            persist_review=persist_review,
+            post_to_github=post_to_github,
+        )
+
         from tests.support.memory_repositories import InMemoryEmbeddingCleanupRepository  # noqa: PLC0415
         cleanup_use_case = CleanupEmbeddingsUseCase(InMemoryEmbeddingCleanupRepository())
 
@@ -110,7 +139,6 @@ async def run_worker() -> None:
                 if isinstance(raw, bytes):
                     raw = raw.decode()
 
-                # Build a fresh dispatcher per message so DB sessions are scoped correctly.
                 dispatcher = await _make_dispatcher(settings)
 
                 try:

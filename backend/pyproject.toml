@@ -129,6 +129,7 @@ omit = [
     # External service adapters — need live credentials to test
     "src/infrastructure/github/app_client.py",
     "src/infrastructure/github/pr_fetcher.py",
+    "src/infrastructure/github/comment_poster.py",
     "src/infrastructure/queue/upstash_redis_client.py",
     "src/infrastructure/observability/langfuse_client.py",
     "src/infrastructure/vector/embedding_service.py",
