@@ -1,0 +1,357 @@
+---
+description: Architectural decision record — read before adding dependencies, changing hosting/model/auth choices, or deviating from locked architecture
+alwaysApply: false
+---
+
+# Architectural Decision Record
+
+Every non-obvious decision is recorded here. Before adding a new external dependency,
+changing a locked decision, or deviating from architecture.mdc, record it here first.
+
+---
+
+## D-01 · AI Model — Gemini 2.5 Flash over Claude / GPT-4o
+
+**Decision:** Use Google Gemini 2.5 Flash as the reasoning model for all agent nodes.
+
+**Context:** The multi-agent pipeline makes 5–7 LLM calls per PR review. At any meaningful
+PR volume, paid models become expensive immediately.
+
+**Alternatives considered:**
+
+- Claude Sonnet 4 — strong code reasoning but no free tier
+- GPT-4o — no free tier; $0.0025/1k input tokens
+- Mistral Large — free tier exists but weaker on multi-file code reasoning
+- Gemini 1.5 Pro — 50 RPD free limit; too low for concurrent reviews
+
+**Rejected because:** Paid models have no free tier; Gemini 2.5 Flash has 1,500 RPD free,
+1M context window (fits full diff + system prompt), and comparable code reasoning quality.
+
+---
+
+## D-02 · Vector Store — pgvector (Neon) over Chroma / Pinecone
+
+**Decision:** Use the pgvector extension on the existing Neon Postgres instance for
+embedding storage and similarity search.
+
+**Context:** RAG context retrieval is per-agent (each agent queries only its relevant
+chunks). We already have a Postgres instance (Neon).
+
+**Alternatives considered:**
+
+- Chroma — self-hosted, adds Docker service; no managed free tier
+- Pinecone — free tier limited to 1 index, 100k vectors; managed but separate service
+- Qdrant Cloud — free tier exists; separate service adds ops overhead
+
+**Rejected because:** Adding a separate vector DB service adds operational complexity and
+cost. pgvector on Neon eliminates the service boundary — embeddings and relational data
+in one place, one backup, one connection pool.
+
+---
+
+## D-03 · Task Queue — Upstash Redis over Celery / RabbitMQ / SQS
+
+**Decision:** Use Upstash Redis (serverless) as the async job queue between the webhook
+handler and the worker process.
+
+**Context:** Webhook handler must return HTTP 202 within ~1s. The agent pipeline takes
+30–120s. A durable queue with at-least-once delivery is required.
+
+**Alternatives considered:**
+
+- Celery + RabbitMQ — production-grade but heavy; RabbitMQ needs a separate server
+- Python asyncio background tasks (FastAPI BackgroundTasks) — no persistence; lost on restart
+- AWS SQS — reliable but not free; adds cloud vendor dependency
+- PostgreSQL SKIP LOCKED queue (pg_boss pattern) — viable but adds polling complexity
+
+**Rejected because:** RabbitMQ/Celery adds significant DevOps overhead. asyncio tasks
+lose jobs on process restart. Upstash Redis has a 10k requests/day free tier, is
+serverless, and fits the Render + worker process model cleanly.
+
+---
+
+## D-04 · Agent Pattern — Supervisor-Routed over Monolithic Prompt
+
+**Decision:** Use a SupervisorAgent that decides which specialist agents to invoke per PR,
+rather than running all agents on every PR or using a single mega-prompt.
+
+**Context:** A single prompt covering security + perf + arch + tests would be 8k+ tokens
+of system prompt, produce unfocused output, and hallucinate across domains. Running all
+agents unconditionally wastes tokens on PRs where only one domain is relevant (e.g., a
+pure CSS change doesn't need SecurityAgent).
+
+**Alternatives considered:**
+
+- Single monolithic prompt — simpler but lower quality; harder to tune per domain
+- Always-run all 4 agents sequentially — deterministic but wasteful; ~4x token cost
+- User-configurable fixed agent set — useful but doesn't use diff content to decide
+
+**Rejected because:** Supervisor routing is the core differentiator. It reads diff
+metadata (file types, paths, change volume) and makes an informed routing decision,
+avoiding wasted tokens and improving per-domain focus.
+
+---
+
+## D-05 · Agent Framework — LangGraph OSS over LangChain AgentExecutor / Custom
+
+**Decision:** Use LangGraph OSS (StateGraph) for the multi-agent pipeline orchestration.
+
+**Context:** The pipeline has branching logic (supervisor decides routes), shared state
+(findings accumulated across agents), and needs deterministic execution order.
+
+**Alternatives considered:**
+
+- LangChain AgentExecutor — opaque tool loop; hard to inspect intermediate state
+- LangGraph Cloud — same as OSS but managed; paid service
+- Custom Python orchestration — full control but rebuilds what LangGraph provides
+
+**Rejected because:** LangGraph OSS gives a stateful, inspectable graph with typed state
+(ReviewState TypedDict), conditional edges, and native Langfuse tracing integration — all
+for free. Cloud version is unnecessary for self-hosted deployment.
+
+---
+
+## D-06 · Observability — Langfuse over LangSmith
+
+**Decision:** Use Langfuse Cloud (free tier) for LLM tracing, span-level token tracking,
+and evaluation datasets.
+
+**Context:** Need per-agent traces, token usage, latency, and eval scoring against a
+golden set of known-bad PRs.
+
+**Alternatives considered:**
+
+- LangSmith — 1,500 traces/month on free tier; not enough at any review volume
+- OpenTelemetry — no LLM-specific spans; requires custom instrumentation per model call
+- Helicone — good for proxy-based logging; less suited for multi-agent eval datasets
+
+**Rejected because:** LangSmith's free tier is too restrictive. Langfuse has 50k events/
+month free, built-in dataset + eval UI, and a LangGraph integration. Open-source so
+self-hostable if needed.
+
+---
+
+## D-07 · GitHub Integration — GitHub App over OAuth App / PAT
+
+**Decision:** Use a GitHub App for all GitHub integration (webhooks, API calls, comment posting).
+
+**Context:** Need webhooks per-repo, higher rate limits, and the ability to work across
+multiple orgs without user OAuth sessions.
+
+**Alternatives considered:**
+
+- GitHub OAuth App — requires user to be logged in for all API calls; lower rate limits
+- Personal Access Token — user-specific; doesn't scale; no webhook support at org level
+- GitHub Actions integration — only works inside CI; can't receive PR events externally
+
+**Rejected because:** GitHub App gives a dedicated bot identity, per-installation access
+tokens (5,000 req/hour vs 60 for unauthenticated), and webhook delivery at the org/repo
+level without requiring individual user OAuth sessions.
+
+---
+
+## D-08 · Backend Architecture — Clean Architecture over Simple Layered
+
+**Decision:** Use Clean Architecture (Domain / Application / Infrastructure / API) rather
+than a flat routes → services → repositories → DB structure.
+
+**Context:** This project has 3 swappable external systems (GitHub→GitLab in EX-07,
+vector DB, queue), is designed to go multi-tenant (EX-01), and needs strong unit
+testability without spinning up infrastructure.
+
+**Alternatives considered:**
+
+- Simple layered (routes/services/repos/db) — less boilerplate; familiar from Node
+- Hexagonal (ports & adapters) — equivalent pattern, different terminology
+
+**Rejected because:** Simple layers don't enforce interface isolation — services can
+directly import SQLAlchemy or the GitHub client, making swaps painful. Clean Architecture
+enforces the dependency rule at the import level. Hexagonal is equivalent; we chose Clean
+Architecture for naming clarity.
+
+**Trade-off acknowledged:** ~20–30% more boilerplate upfront. Justified by EX-01 and
+EX-07 extensibility goals.
+
+---
+
+## D-09 · Database Hosting — Neon over Supabase / Railway / Render Postgres
+
+**Decision:** Use Neon (serverless Postgres) as the primary database.
+
+**Context:** Need Postgres + pgvector, free tier, and branching for staging environments.
+
+**Alternatives considered:**
+
+- Supabase — has pgvector but adds auth/storage opinions and a heavier SDK
+- Railway Postgres — free tier is small ($5 credits, expires monthly)
+- Render Postgres — free tier, but limited to 90 days then deleted
+
+**Rejected because:** Supabase adds opinions we don't need (we have our own auth layer).
+Railway credits expire. Render free Postgres is deleted after 90 days. Neon has 0.5GB
+persistent free, database branching (useful for staging), and native pgvector support.
+
+---
+
+## D-10 · Backend Hosting — Render over Railway / Fly.io
+
+**Decision:** Use Render free tier for the FastAPI API server and worker process.
+
+**Context:** Need auto-deploy from GitHub, free tier, Docker support, and multiple
+services (API + worker).
+
+**Alternatives considered:**
+
+- Railway — $5/month free credits (expire); better DX but not truly free long-term
+- Fly.io — generous free tier but requires more DevOps configuration (fly.toml, regions)
+- Self-hosted VPS — full control but requires server management
+
+**Cold start behaviour (documented):** Render free web services spin down after 15 minutes
+of inactivity. First request after sleep takes ~30s. Worker is a background worker
+service (doesn't spin down on Render free tier). Webhook handler returns 202 immediately
+(async), so cold-start latency doesn't affect GitHub's webhook delivery expectations.
+
+**Rejected because:** Railway credits expire monthly. Fly.io adds DevOps overhead. Render
+is simpler to configure and has native Docker + GitHub auto-deploy.
+
+---
+
+## D-11 · Diff Handling — Hybrid (Full / Per-File) over Always-Chunk / RAG-Only
+
+**Decision:** Pass the full unified diff when PR has ≤50 changed files; chunk per-file
+for larger PRs. Use RAG for broader codebase context in both modes.
+
+**Context:** Gemini 2.5 Flash has a 1M token context window, but system prompts, few-shot
+examples, RAG chunks, and per-agent instructions together consume 8–15k tokens. For large
+PRs, the diff itself can exceed 200k tokens.
+
+**Alternatives considered:**
+
+- Always chunk per-file — loses cross-file context (e.g., a function moved between files)
+- Always full diff — hits context limits on PRs with 100+ files
+- RAG-only (embed diff, retrieve top-k) — loses sequential diff structure and line numbers
+
+**Rejected because:** Always-chunk and RAG-only both lose important cross-file signals.
+Hybrid gives full context for typical PRs (≤50 files) and degrades gracefully for large ones.
+
+**50-file threshold:** Conservative estimate based on ~2k tokens per changed file average.
+Revisit if real-world token counts differ significantly.
+
+---
+
+## D-12 · Auth — Signed JWT Session over Refresh Tokens / Cookie Sessions
+
+**Decision:** Issue a signed JWT (HS256, 7-day expiry) as the session token after GitHub
+OAuth callback. Store in localStorage on the frontend; send as Bearer header.
+
+**Context:** Dashboard is internal tooling for repo owners / org admins. Simplicity
+trumps enterprise-grade session management for v1.
+
+**Alternatives considered:**
+
+- Refresh token rotation — more secure but adds token refresh logic on both ends
+- HttpOnly cookie sessions — avoids localStorage XSS risk but complicates CORS for SPA
+- Supabase Auth — removes custom JWT logic but adds a hard dependency
+- GitHub OAuth token as session — leaks GitHub scope; can't encode app-specific claims
+
+**Rejected because:** Refresh token rotation adds frontend complexity. HttpOnly cookies
+require careful SameSite/CORS configuration for Vercel → Render cross-origin calls.
+Supabase Auth is overkill. 7-day JWT is acceptable for an internal dashboard; rotate by
+forcing re-login on expiry.
+
+**Security note:** JWT secret must be ≥256-bit random value stored in environment
+variable. Never hardcode. Rotate by changing the env var (all existing sessions invalidate).
+
+---
+
+## D-13 · Embedding Scope — Selective Per-PR (not full codebase snapshot)
+
+**Decision:** Embed only the files touched by the PR (changed files + their 1-hop import
+graph) rather than indexing the entire repository upfront.
+
+**Context:** A large repository may have 10,000+ files. Embedding the full codebase
+upfront wastes Gemini embedding quota (1,500 RPD free), storage, and latency. The context
+relevant to any specific PR is bounded by what that PR touches.
+
+**Alternatives considered:**
+
+- Full codebase index — comprehensive but expensive, stale between PRs, hits free-tier limits
+- Diff-only embedding — cheap but loses cross-file context (callers, imports, type definitions)
+- No embeddings — agents have no retrieval; false positive rate increases
+
+**Rejected because:** Full indexing wastes the free-tier quota on files irrelevant to the
+PR. Diff-only loses cross-file context. Selective embedding gives the right balance.
+
+**Cleanup strategy:** On `pull_request.closed` (merged or closed), delete all
+`code_embeddings` rows for `(repository_id, head_sha)`. Belt-and-suspenders: a weekly
+background job deletes rows older than 30 days to handle missed webhooks.
+
+**Edge case:** If two PRs share a head SHA (cherry-pick scenario), the cleanup of one
+deletes the other's embeddings. Accepted for MVP — embeddings are re-created on next review.
+
+---
+
+## D-14 · Review Trigger — Every `synchronize` Event (full base→head diff)
+
+**Decision:** Trigger a full review on `opened`, `synchronize`, and `reopened` events.
+Each review covers the full PR diff (base_sha → head_sha), not just the incremental push.
+
+**Context:** Authors push follow-up commits after receiving feedback. A reviewer who only
+sees the first version is useless in the iterative cycle.
+
+**Alternatives considered:**
+
+- Only on `opened` — misses follow-up reviews; reduces tool value to one-shot feedback
+- Only on significant pushes (debounced) — adds complexity; hard to define "significant"
+- On `merged` only — too late for the author to act on findings
+
+**Rejected because:** Review value is highest during the open PR lifecycle. Reviewing
+only on open makes the tool a linter, not a reviewer.
+
+**Rapid-push behaviour:** Multiple pushes in quick succession queue multiple jobs. For
+MVP, this is accepted (extra jobs are harmless). A future improvement: if a new job for
+the same PR arrives while a previous one is `pending`, cancel the older one.
+
+**What "full diff" means:** Always diff base_sha → head_sha (the full PR, not the
+incremental push delta). This ensures agents see the complete change set in context.
+
+---
+
+## D-15 · Agent Input — Structured Context Package (not raw diff)
+
+**Decision:** Each agent receives a structured "Review Package" containing:
+
+1. PR metadata (title, author, changed file list)
+2. Changed context units: for each function/class containing ≥1 changed line — the
+   complete old version, complete new version, and the unified diff for that unit
+3. Agent-specific RAG context: top-5 semantically related functions from other files
+
+Raw diff alone is not passed to agents.
+
+**Context:** A raw unified diff shows only changed lines. Agents need surrounding context
+to reason correctly: function signatures, decorators, type hints, calling patterns, and
+imports. Without this, false positive rates increase significantly.
+
+**Example:** A diff showing `filter(User.id == request.args.get('id'))` is ambiguous
+without knowing the function's decorator (`@require_admin`?), the type of `User.id`, and
+whether there is type coercion elsewhere. The full function + RAG context resolves this.
+
+**Alternatives considered:**
+
+- Raw diff only — fast and cheap; high false positive rate; misses decorator/import context
+- Full file content — complete but too token-heavy for files >200 lines; no change signal
+- RAG-only retrieval — loses sequential diff structure and line numbers
+
+**Rejected because:** Raw diff produces noise. Full file blows the context budget. The
+structured package gives precise change signal (diff) + semantic completeness (full
+function) + cross-file context (RAG).
+
+**Token budget per agent call (typical PR, ≤50 files):**
+
+- System prompt: ~1,500 tokens
+- PR metadata + file summary: ~300 tokens
+- 5 changed functions × ~500 tokens each: ~2,500 tokens
+- RAG context (5 chunks × ~400 tokens): ~2,000 tokens
+- Total: ~6,300 tokens — well within Gemini 2.5 Flash limits
+
+**Large function handling:** Functions >300 lines are trimmed to: full signature + first
+30 lines + changed lines ±10 context lines + last 5 lines before return.

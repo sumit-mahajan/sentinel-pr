@@ -1,0 +1,205 @@
+---
+description: React/TypeScript frontend coding standards — feature boundaries, TanStack Query, Zustand, API modules
+globs: frontend/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Frontend Coding Standards
+
+## State Management Split — Strict Rule
+
+**TanStack Query** owns all server state. **Zustand** owns all client state. Never mix.
+
+```typescript
+// GOOD — server state in TanStack Query
+function useReviews(repoId: string) {
+  return useQuery({
+    queryKey: ['reviews', repoId],
+    queryFn: () => reviewsApi.list(repoId),
+  });
+}
+
+// GOOD — client state in Zustand
+const useAuthStore = create<AuthState>((set) => ({
+  user: null,
+  token: null,
+  setUser: (user) => set({ user }),
+}));
+
+// BAD — API data in Zustand
+const useReviewStore = create((set) => ({
+  reviews: [],
+  fetchReviews: async () => { /* ❌ wrong layer */ },
+}));
+```
+
+---
+
+## Feature Boundary Rule — No Cross-Feature Imports
+
+Features must not import from each other. Cross-feature data goes through `shared/types/api.ts`.
+
+```typescript
+// BAD — reviews feature importing auth hook
+import { useAuth } from '../auth/hooks/useAuth';  // ❌
+
+// GOOD — read from shared store
+import { useAuthStore } from '@/features/auth/store/authStore';  // ✅ shared store
+// OR pass as prop from a parent layout component
+```
+
+Every feature is self-contained:
+```
+features/reviews/
+  pages/         ← route-level components
+  components/    ← feature-scoped UI
+  hooks/         ← TanStack Query hooks
+  api/           ← axios calls (only place fetch/axios is used)
+```
+
+---
+
+## API Module Pattern — No fetch() Outside api/
+
+```typescript
+// GOOD — all HTTP in the api/ module
+// features/reviews/api/reviewsApi.ts
+export const reviewsApi = {
+  list: (repoId: string, page = 1) =>
+    apiClient.get<PaginatedResponse<ReviewSummaryDTO>>('/reviews', { params: { repo_id: repoId, page } }),
+
+  getById: (id: string) =>
+    apiClient.get<ReviewDetailDTO>(`/reviews/${id}`),
+};
+
+// GOOD — hook uses api module
+// features/reviews/hooks/useReviews.ts
+export function useReviews(repoId: string) {
+  return useQuery({ queryKey: ['reviews', repoId], queryFn: () => reviewsApi.list(repoId) });
+}
+
+// BAD — fetch directly in component
+function ReviewList() {
+  const [reviews, setReviews] = useState([]);
+  useEffect(() => {
+    fetch('/api/v1/reviews').then(...)  // ❌ never
+  }, []);
+}
+```
+
+`apiClient` is the shared axios instance in `shared/utils/apiClient.ts` that:
+- Sets `Authorization: Bearer <token>` from Zustand auth store
+- Handles 401 → clears auth and redirects to login
+- Has base URL from `config/env.ts`
+
+---
+
+## Environment Variables — Always via config/env.ts
+
+```typescript
+// GOOD
+import { env } from '@/config/env';
+const url = env.VITE_API_BASE_URL;
+
+// BAD
+const url = import.meta.env.VITE_API_BASE_URL;  // ❌ no type safety, scattered
+
+// BAD
+const url = 'http://localhost:8000';  // ❌ hardcoded
+```
+
+`config/env.ts` exports a typed, validated env object.
+
+---
+
+## TypeScript — Strict Mode, No `any`
+
+```typescript
+// BAD
+const handleData = (data: any) => { ... }  // ❌
+
+// GOOD
+const handleData = (data: ReviewDetailDTO) => { ... }  // ✅
+
+// Acceptable with justification
+const legacy = response.data as any; // TODO: type after backend adds schema  ✅ comment required
+```
+
+Use `unknown` instead of `any` when the type is genuinely unknown — then narrow with type guards.
+All shared API response types live in `shared/types/api.ts` mirroring backend DTOs.
+
+---
+
+## Component Patterns
+
+```typescript
+// GOOD — named export, colocated with feature
+export function ReviewCard({ review }: { review: ReviewSummaryDTO }) {
+  return <div>...</div>;
+}
+
+// GOOD — loading/error handled at the hook call site, not deep in tree
+function ReviewsPage() {
+  const { data, isLoading, error } = useReviews(repoId);
+  if (isLoading) return <Spinner />;
+  if (error) return <ErrorState message="Failed to load reviews" />;
+  return <ReviewList reviews={data.items} />;
+}
+
+// BAD — default export from deep inside a file
+export default function () { ... }  // ❌ harder to refactor/search
+```
+
+No class components. All components are function components.
+No prop drilling more than 2 levels — use context or shared store.
+
+---
+
+## Mutation Pattern (TanStack Query)
+
+```typescript
+// GOOD — optimistic update or invalidate on success
+function useUpdateAgentConfig(repoId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (config: UpdateAgentConfigRequest) => repositoriesApi.updateConfig(repoId, config),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['repos', repoId, 'config'] }),
+    onError: (err) => toast.error('Failed to update config'),
+  });
+}
+```
+
+Never use `useState` + `useEffect` + `fetch` for data fetching. Always use TanStack Query.
+
+---
+
+## Naming Conventions
+
+| Thing | Convention | Example |
+|---|---|---|
+| Components | `PascalCase.tsx` | `ReviewCard.tsx` |
+| Hooks | `use` prefix, `camelCase.ts` | `useReviews.ts` |
+| API modules | `camelCase + Api.ts` | `reviewsApi.ts` |
+| Stores | `camelCase + Store.ts` | `authStore.ts` |
+| Types/interfaces | `PascalCase` | `ReviewDetailDTO` |
+| Page components | `PascalCase + Page.tsx` | `ReviewDetailPage.tsx` |
+
+---
+
+## Tooling
+
+```bash
+# Type check (no emit)
+npx tsc --noEmit
+
+# Lint
+npx eslint frontend/src/
+
+# Tests
+npx vitest run
+
+# All checks
+npm run check
+```
+
+`tsc`, `eslint`, and `vitest` must pass with zero new errors before any commit.

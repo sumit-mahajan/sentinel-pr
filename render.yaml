@@ -1,0 +1,84 @@
+services:
+  # ── FastAPI API server ────────────────────────────────────────────────────
+  - type: web
+    name: pr-reviewer-api
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    # Override CMD to run the API
+    dockerCommand: uv run uvicorn src.api.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      # All secrets set in Render dashboard (sync: false = manual via dashboard)
+      - key: DATABASE_URL
+        sync: false
+      - key: UPSTASH_REDIS_URL
+        sync: false
+      - key: UPSTASH_REDIS_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_EXPIRE_DAYS
+        value: "7"
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_PRIVATE_KEY_B64
+        sync: false
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_HOST
+        value: https://cloud.langfuse.com
+      - key: FRONTEND_URL
+        sync: false
+
+  # ── Async worker (queue consumer) ────────────────────────────────────────
+  # Render background workers do NOT sleep on idle — suitable for queue polling.
+  - type: worker
+    name: pr-reviewer-worker
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: uv run python -m worker.main
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: UPSTASH_REDIS_URL
+        sync: false
+      - key: UPSTASH_REDIS_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_PRIVATE_KEY_B64
+        sync: false
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_HOST
+        value: https://cloud.langfuse.com
+
+# NOTE: Cold-start behaviour (free tier)
+#   - API web service: spins down after 15 min inactivity, ~30s cold start
+#   - Worker service: does NOT spin down (background worker type)
+#   - Webhook handler returns 202 immediately (async), so cold starts don't
+#     affect GitHub's webhook delivery timeout (10s)

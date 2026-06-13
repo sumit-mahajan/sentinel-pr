@@ -1,0 +1,103 @@
+"""Tests for RunReviewPipelineUseCase — job lifecycle and retry logic."""
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock
+from uuid import uuid4
+
+import pytest
+
+from application.use_cases.run_review_pipeline import MAX_ATTEMPTS, RunReviewPipelineUseCase
+from domain.entities.job import ReviewJob
+from domain.errors import ApplicationError
+from domain.services.i_agent_orchestrator import OrchestratorResult
+from domain.value_objects.job_status import JobStatus
+from tests.support.memory_repositories import InMemoryJobRepository
+
+
+def _make_job(attempt_count: int = 0, status: JobStatus = JobStatus.PENDING) -> ReviewJob:
+    now = datetime.now(UTC)
+    return ReviewJob(
+        id=uuid4(),
+        repository_id=uuid4(),
+        pr_number=1,
+        pr_title="Test PR",
+        pr_author="dev",
+        pr_url="https://github.com/org/repo/pull/1",
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        status=status,
+        attempt_count=attempt_count,
+        error_message=None,
+        enqueued_at=now,
+        started_at=None,
+        completed_at=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_completes_successfully() -> None:
+    job = _make_job()
+    repo = InMemoryJobRepository()
+    repo._jobs[(job.repository_id, job.head_sha)] = job
+
+    orchestrator = AsyncMock()
+    orchestrator.run.return_value = OrchestratorResult(
+        job_id=job.id, agents_run=[], total_findings=3
+    )
+
+    use_case = RunReviewPipelineUseCase(repo, orchestrator)
+    result = await use_case.execute(job.id)
+
+    assert result is True
+    stored = await repo.get_by_id(job.id)
+    assert stored is not None
+    assert stored.status == JobStatus.COMPLETED
+    assert stored.attempt_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_marks_failed_on_orchestrator_error() -> None:
+    job = _make_job()
+    repo = InMemoryJobRepository()
+    repo._jobs[(job.repository_id, job.head_sha)] = job
+
+    orchestrator = AsyncMock()
+    orchestrator.run.side_effect = RuntimeError("Gemini unavailable")
+
+    use_case = RunReviewPipelineUseCase(repo, orchestrator)
+    result = await use_case.execute(job.id)
+
+    assert result is False
+    stored = await repo.get_by_id(job.id)
+    assert stored is not None
+    assert stored.status == JobStatus.FAILED
+    assert stored.error_message is not None
+    assert "Gemini unavailable" in stored.error_message
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_job_at_max_attempts() -> None:
+    job = _make_job(attempt_count=MAX_ATTEMPTS)
+    repo = InMemoryJobRepository()
+    repo._jobs[(job.repository_id, job.head_sha)] = job
+
+    orchestrator = AsyncMock()
+    use_case = RunReviewPipelineUseCase(repo, orchestrator)
+
+    with pytest.raises(ApplicationError):
+        await use_case.execute(job.id)
+
+    orchestrator.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_returns_true_for_unknown_job() -> None:
+    """Worker should ack an unknown job rather than crash."""
+    repo = InMemoryJobRepository()
+    orchestrator = AsyncMock()
+    use_case = RunReviewPipelineUseCase(repo, orchestrator)
+
+    result = await use_case.execute(uuid4())
+    assert result is True
+    orchestrator.run.assert_not_awaited()

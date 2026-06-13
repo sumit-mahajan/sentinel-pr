@@ -1,0 +1,92 @@
+---
+description: Current session state — tracks completed steps, in-progress work, open questions, and next action
+alwaysApply: true
+---
+
+# Session State
+
+> Update this file at the end of every session. Read it at the start of every session
+> before taking any action.
+
+---
+
+## Progress
+
+| Step | Status | File(s) |
+|------|--------|---------|
+| Step 0 — Clarifying questions | DONE | — |
+| Step 1 — Lock features | DONE | `features.mdc` |
+| Step 2 — Lock architecture | DONE | `architecture.mdc`, `decisions.mdc` |
+| Step 2.5 — Initialize session state | DONE | `session-state.mdc` (this file) |
+| Step 3 — Lock data contracts | DONE | `schema.mdc` (DB schema + DTOs + API contract) |
+| Step 4 — Workspace setup | DONE | `reviewer.mdc`, `backend-standards.mdc`, `frontend-standards.mdc`, `.cursor/hooks.json`, `.pre-commit-config.yaml` |
+| Step 4.5 — Lock deployment config | DONE | `Dockerfile`, `docker-compose.yml`, `.env.example`, `render.yaml`, `vercel.json`, `Makefile`, `.gitignore`, `pyproject.toml`, `package.json`, full dir skeleton |
+| Step 5 — Incremental feature build | IN PROGRESS | F-01 ✓, F-05 ✓ |
+
+---
+
+## Last Completed Step
+
+Step 4.5 — Deployment config complete. Full project skeleton created. Ready to build features.
+
+---
+
+## Current In-Progress
+
+F-05 Async Worker System — done. 28/28 tests passing, 77% coverage. Next: F-07 Observability + Storage (Langfuse tracing infra + DB persistence layer).
+
+---
+
+## Decisions Made This Session
+
+- D-01: Gemini 2.5 Flash as the AI model (free tier, 1M context, 1500 RPD)
+- D-02: pgvector on Neon instead of Chroma/Pinecone
+- D-03: Upstash Redis for task queue
+- D-04: Supervisor-routed multi-agent pattern
+- D-05: LangGraph OSS for agent orchestration
+- D-06: Langfuse for observability (not LangSmith)
+- D-07: GitHub App (not OAuth App or PAT)
+- D-08: Clean Architecture for backend
+- D-09: Neon for database hosting
+- D-10: Render for backend hosting (cold-start documented)
+- D-11: Hybrid diff handling (≤50 files = full, >50 = per-file chunks)
+- D-12: Signed JWT (HS256, 7-day) for dashboard session auth
+
+---
+
+## Locked Files (do not modify without flagging conflict)
+
+- `features.mdc` — feature scope locked
+- `architecture.mdc` — architecture locked
+- `decisions.mdc` — decision record locked
+- `schema.mdc` — DB schema + DTOs + API contract locked
+
+---
+
+## Open Questions / Blockers
+
+None.
+
+---
+
+## Next Immediate Action
+
+**Step 4 — Workspace Setup:**
+1. Add `reviewer.mdc` with pre-commit review checklist
+2. Add `reviewer-agent` hook using the review-bugbot or security-review skill
+3. Confirm tooling: ruff (linter), mypy (types), pytest (tests), ESLint + tsc (frontend)
+
+---
+
+## Feature Build Order (Step 5 — planned)
+
+Priority order based on P0 → P1 → P2 and dependency graph:
+
+1. **F-01** GitHub App Webhook Integration (P0 — foundation for everything)
+2. **F-05** Async Worker System + Redis queue (P0 — needed before agents can run)
+3. **F-07** Observability + PostgreSQL persistence (P0 — needed to debug agents)
+4. **F-02** Multi-Agent Review Pipeline (P0 — core value)
+5. **F-03** Code Context & RAG (P1 — improves agent quality)
+6. **F-04** Structured Review Output + GitHub comment posting (P0 — closes the loop)
+7. **F-06** Web Dashboard (P1 — UI on top of working pipeline)
+8. **F-08** Evaluation System (P2 — quality measurement)

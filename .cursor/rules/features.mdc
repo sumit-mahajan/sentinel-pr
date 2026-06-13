@@ -1,0 +1,172 @@
+---
+description: Feature scope for the Agentic Code Review Assistant — core MVP features and future extensible features
+alwaysApply: true
+---
+
+# Feature Scope: Agentic Code Review Assistant
+
+## Core Features (MVP — building now)
+
+Priority levels: **P0** = must-have for the pipeline to function · **P1** = needed for
+production quality · **P2** = important but can ship without
+
+### F-01 · GitHub App Webhook Integration `P0`
+
+**Acceptance criteria:** A PR opened/updated on any installed repo triggers a job within
+5s; webhook always returns HTTP 202 in under 1s regardless of pipeline duration.
+A closed/merged PR triggers embedding cleanup within 30s.
+
+- Handle PR events: `opened`, `synchronize`, `reopened` → enqueue review job
+- Handle PR event: `closed` (merged or closed) → enqueue embedding cleanup job
+- Each `synchronize` review covers the **full base→head diff**, not just the incremental push
+- Immediately return HTTP 202; enqueue async review job to Upstash Redis
+- GitHub App JWT authentication + per-installation access tokens
+- Fetch PR diff (unified format), changed file list, and base-branch file tree from GitHub REST API
+- Post line-level review comments and a summary PR review via GitHub Review API
+
+### F-02 · Multi-Agent Review Pipeline (LangGraph OSS) `P0`
+
+**Acceptance criteria:** A real PR diff produces structured findings from at least one
+specialist agent; SynthesisAgent output posts to GitHub without contradiction errors.
+
+- **SupervisorAgent**: reads diff metadata (file types, change volume, modified paths) and decides which specialist agents to invoke; avoids running all agents on every PR
+- **SecurityAgent**: OWASP Top 10 violations, hardcoded secrets/credentials, injection flaws (SQL/command/path), insecure deserialization, use of vulnerable patterns
+- **PerfAgent**: N+1 query patterns, algorithmic complexity regressions, blocking I/O in async contexts, inefficient data structures, unnecessary re-renders (React)
+- **ArchAgent**: layer violations (e.g. DB calls in route handlers), tight coupling, circular dependencies, separation of concerns, naming and module boundary conventions
+- **TestAgent**: missing tests for changed public functions, missing edge cases, poor/missing assertions, test-to-code ratio regression
+- **SynthesisAgent**: deduplicates findings across agents, assigns final severity (Critical / High / Medium / Low / Info), formats structured review with fix suggestions, resolves agent contradictions
+
+### F-03 · Code Context & RAG `P1`
+
+**Acceptance criteria:** SecurityAgent retrieves auth-related context files not in the
+diff; embedding lookup latency < 500ms per agent query; embeddings are deleted within
+30s of PR close.
+
+- tree-sitter AST parsing for **Python** and **JavaScript/TypeScript** — chunk at function/class boundaries, not character count
+- Each agent receives a structured Review Package: PR metadata + changed context units (full old+new function bodies from tree-sitter) + agent-specific RAG context (top-5 related chunks)
+- Embed changed files + 1-hop import graph into pgvector (Neon Postgres), keyed by commit SHA
+- Per-agent RAG retrieval: each agent queries only relevant context (SecurityAgent → auth/crypto patterns; PerfAgent → DB/loop patterns; ArchAgent → imports/class hierarchy)
+- Hybrid diff handling: full package for PRs ≤50 files; batch per 10 files for larger PRs
+- **Embedding cleanup**: on `pull_request.closed`, delete all `code_embeddings` rows for `(repository_id, head_sha)`; weekly background job clears rows older than 30 days
+
+### F-04 · Structured Review Output `P0`
+
+**Acceptance criteria:** Every finding posted to GitHub has severity, category, file path,
+line range, description, and fix suggestion; re-reviewing the same commit SHA is a no-op.
+
+- Every finding includes: `severity`, `category` (security/perf/arch/test), `file`, `line_range`, `description`, `fix_suggestion`, `agent_source`
+- Line-level GitHub comments on specific diff lines where applicable
+- Single summarizing PR review body posted as a GitHub review (COMMENT status)
+- Idempotent per commit SHA: skip re-review unless forced
+
+### F-05 · Async Worker System `P0`
+
+**Acceptance criteria:** A job enqueued to Redis is picked up by the worker within 10s;
+failed jobs retry up to 3 times with backoff; job state is always queryable from the DB.
+
+- Webhook handler enqueues job; Upstash Redis as queue
+- Worker process consumes queue, runs LangGraph pipeline, updates job status
+- Job states: `pending → running → completed | failed`
+- Retry with exponential backoff on transient failures (max 3 attempts)
+- Job status and results persisted in PostgreSQL
+
+### F-06 · Web Dashboard (React + Vite + TypeScript) `P1`
+
+**Acceptance criteria:** A logged-in user can see all reviews for their repos, toggle
+agents per repo, and navigate to a review detail page with per-finding breakdown.
+
+- **Auth**: GitHub OAuth via GitHub App — login required to access dashboard
+- **Repositories**: list installed repos, enable/disable review per repo
+- **Agent config**: toggle which agents run per repo (Security, Perf, Arch, Test)
+- **Review history**: paginated list of past reviews per repo (date, PR#, severity summary)
+- **Review detail**: full review findings, per-agent breakdown, severity distribution, Langfuse trace link
+- **GitHub App install flow**: guided install link for new orgs/repos
+
+### F-07 · Observability & Storage `P0`
+
+**Acceptance criteria:** Every PR review produces a Langfuse trace with per-agent spans
+and token counts; all reviews and findings are queryable from the DB indefinitely.
+
+- Langfuse Cloud (free tier) tracing: one trace per PR review, one span per agent node
+- Track per-agent token usage and latency
+- All reviews persisted in PostgreSQL: full findings JSON, metadata, timestamps
+
+### F-08 · Evaluation System `P2`
+
+**Acceptance criteria:** `make eval` runs against all 20 golden PRs and reports
+precision/recall per agent category; false positive rate is tracked per run.
+
+- Synthetic golden set: ~20 hand-crafted known-bad PRs covering each agent's domain
+- Langfuse datasets + LLM-as-judge scoring for each review run against golden set
+- CLI command `make eval` runs the full eval suite and reports precision/recall per category
+- Track false positive rate per agent category over time
+
+---
+
+## Extensible Future Features (designed for, not building now)
+
+### EX-01 · Multi-Tenant SaaS
+
+- Organization isolation (row-level security in Postgres)
+- Billing tiers with usage quotas (reviews/month)
+- Admin portal for org management
+- API keys per org
+
+### EX-02 · Additional Language Support
+
+- Java, Go, Rust, C++ via tree-sitter grammar additions
+- Language-specific rule packs per agent
+- Architecture: adding a language is one grammar file + one embedding config
+
+### EX-03 · Custom Rule Sets (per-repo YAML)
+
+- `.pr-review.yml` config in repo root
+- Define custom patterns, disable specific rules, set severity overrides
+- Rule versioning and inheritance
+
+### EX-04 · Notifications (Slack / Teams / Email)
+
+- Webhook-out to Slack channel on review completion
+- Configurable: only notify on Critical/High findings
+
+### EX-05 · Auto-Fix Pull Requests
+
+- For simple, deterministic findings (e.g. missing null check, unused import), auto-open a fix PR
+- Human-in-the-loop approval before push
+
+### EX-06 · Developer & Team Analytics
+
+- Per-developer issue frequency trends
+- Team-wide code quality dashboard over time
+- Issue category breakdown by repo
+
+### EX-07 · Multi-Platform VCS Support
+
+- GitLab MR integration (same pipeline, different API adapters)
+- Bitbucket PR integration
+- Architecture: VCS platform is an interface; GitHub is the first implementation
+
+### EX-08 · CI/CD Gate Integration
+
+- GitHub Actions status check that blocks merge if Critical/High findings exceed threshold
+- Configurable threshold per repo
+
+### EX-09 · False Positive Feedback Loop
+
+- Developers dismiss individual comments with a reason
+- Dismissed comments logged; used to fine-tune agent prompts or adjust severity calibration
+
+### EX-10 · Fine-Tuned / Org-Specific Models
+
+- Fine-tune on org's historical PR review data
+- Custom severity calibration per org based on their coding standards
+
+### EX-11 · Pre-Commit IDE Plugin
+
+- VS Code extension that runs SecurityAgent + ArchAgent on staged diff before commit
+- Requires local model or API key
+
+### EX-12 · PR Complexity Scoring
+
+- ML-based complexity metrics (churn, coupling change, test coverage delta)
+- Review effort estimation surfaced in the PR review summary

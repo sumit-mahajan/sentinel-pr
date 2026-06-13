@@ -1,0 +1,74 @@
+services:
+  # ── FastAPI API server ────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/pr_reviewer
+      - UPSTASH_REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./backend/src:/app/src       # hot-reload in dev
+      - ./backend/worker:/app/worker
+    command: uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── Async worker (queue consumer) ────────────────────────────────────────
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/pr_reviewer
+      - UPSTASH_REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/worker:/app/worker
+    command: uv run python -m worker.main
+
+  # ── Postgres + pgvector ───────────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pr_reviewer
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (local queue — use Upstash in production) ───────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes   # persist queue across restarts
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:

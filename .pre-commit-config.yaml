@@ -1,0 +1,54 @@
+repos:
+  # ── General hygiene ────────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: detect-private-key          # catches actual PEM keys / raw tokens
+
+  # ── Python: ruff (lint + format, replaces flake8/black/isort) ───────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^backend/
+      - id: ruff-format
+        files: ^backend/
+
+  # ── Python: mypy (type checking) ────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (backend)
+        entry: bash -c 'cd backend && uv run mypy src/'
+        language: system
+        files: ^backend/.*\.py$
+        pass_filenames: false
+        stages: [pre-commit]
+
+  # ── TypeScript: tsc + eslint ────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: tsc
+        name: tsc --noEmit (frontend)
+        entry: bash -c 'cd frontend && npx tsc --noEmit'
+        language: system
+        files: ^frontend/.*\.(ts|tsx)$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: eslint
+        name: eslint (frontend)
+        entry: bash -c 'cd frontend && npx eslint src/ --ext .ts,.tsx --max-warnings 0'
+        language: system
+        files: ^frontend/.*\.(ts|tsx)$
+        pass_filenames: false
+        stages: [pre-commit]

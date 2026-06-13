@@ -1,0 +1,488 @@
+---
+description: System architecture for the Agentic Code Review Assistant — clean architecture backend, feature-based React frontend
+alwaysApply: true
+---
+
+# Architecture: Agentic Code Review Assistant
+
+## Guiding Principles
+
+1. **Dependency Rule**: dependencies point inward only — outer layers depend on inner layers, never the reverse. Domain is the innermost core; Application wraps it; **API** and **Infrastructure** are sibling outer layers (both depend inward). Runtime request flow: `API → Application → Domain (interface) → Infrastructure → external systems`
+2. **Interface isolation**: all external systems (DB, GitHub, AI, Redis) are accessed through interfaces defined in Domain; Infrastructure provides the implementations
+3. **No framework bleed**: Domain and Application layers have zero imports from FastAPI, SQLAlchemy, or any third-party library
+4. **Async-first**: every I/O operation is `async`; no blocking calls in the request path
+5. **Single responsibility per agent**: each LangGraph agent node has one concern; SynthesisAgent owns reconciliation
+
+---
+
+## Backend — Directory Structure
+
+```
+backend/
+├── src/
+│   ├── domain/                        # Inner core — entities, enums, repository/service interfaces
+│   │   ├── entities/
+│   │   │   ├── review.py              # Review, Finding, ReviewStatus enum
+│   │   │   ├── repository.py          # Repository, AgentConfig
+│   │   │   ├── job.py                 # ReviewJob, JobStatus enum
+│   │   │   └── user.py                # User, GithubInstallation
+│   │   ├── value_objects/
+│   │   │   ├── severity.py            # Severity enum (Critical/High/Medium/Low/Info)
+│   │   │   ├── file_change.py         # FileChange (path, patch, status)
+│   │   │   └── agent_type.py          # AgentType enum (Security/Perf/Arch/Test)
+│   │   ├── repositories/              # Abstract repository interfaces
+│   │   │   ├── i_review_repository.py
+│   │   │   ├── i_repo_repository.py
+│   │   │   ├── i_job_repository.py
+│   │   │   └── i_user_repository.py
+│   │   └── services/                  # Abstract service interfaces
+│   │       ├── i_agent_orchestrator.py
+│   │       ├── i_github_client.py
+│   │       ├── i_embedding_service.py
+│   │       └── i_queue_client.py
+│   │
+│   ├── application/                   # Use cases + DTOs; imports only Domain
+│   │   ├── use_cases/
+│   │   │   ├── start_review.py        # Enqueue review job for a PR
+│   │   │   ├── run_review_pipeline.py # Execute full agent pipeline for a job
+│   │   │   ├── get_review.py          # Fetch single review by ID
+│   │   │   ├── list_reviews.py        # Paginated review history for a repo
+│   │   │   ├── configure_repo.py      # Enable/disable agents per repo
+│   │   │   └── handle_github_auth.py  # Exchange OAuth code for user session
+│   │   └── dtos/
+│   │       ├── review_dto.py
+│   │       ├── finding_dto.py
+│   │       ├── repo_dto.py
+│   │       └── job_dto.py
+│   │
+│   ├── infrastructure/                # Outer adapter — implements Domain interfaces (DB, GitHub, AI, Redis)
+│   │   ├── db/
+│   │   │   ├── models/                # SQLAlchemy ORM models (mirror domain entities)
+│   │   │   ├── repositories/          # Concrete repository implementations
+│   │   │   ├── migrations/            # Alembic migration scripts
+│   │   │   └── session.py             # Async SQLAlchemy engine + session factory
+│   │   ├── github/
+│   │   │   ├── app_client.py          # GitHub App JWT auth, installation tokens
+│   │   │   ├── pr_fetcher.py          # Fetch diff, file tree, PR metadata
+│   │   │   └── comment_poster.py      # Post line comments + PR review
+│   │   ├── ai/
+│   │   │   ├── gemini_client.py       # Google Gemini 2.5 Flash wrapper
+│   │   │   ├── graph/
+│   │   │   │   ├── state.py           # ReviewState TypedDict (LangGraph state)
+│   │   │   │   └── review_graph.py    # LangGraph StateGraph definition
+│   │   │   ├── agents/
+│   │   │   │   ├── base_agent.py      # Langfuse tracing, Gemini call, structured output
+│   │   │   │   ├── supervisor_agent.py
+│   │   │   │   ├── security_agent.py
+│   │   │   │   ├── perf_agent.py
+│   │   │   │   ├── arch_agent.py
+│   │   │   │   ├── test_agent.py
+│   │   │   │   └── synthesis_agent.py
+│   │   │   └── prompts/               # One module per agent with system + user prompt templates
+│   │   ├── vector/
+│   │   │   ├── embedding_service.py   # Gemini embedding API wrapper
+│   │   │   └── pgvector_store.py      # Store + retrieve code chunks via pgvector
+│   │   ├── parsers/
+│   │   │   ├── base_parser.py         # Abstract AST parser interface
+│   │   │   ├── python_parser.py       # tree-sitter Python grammar
+│   │   │   └── typescript_parser.py   # tree-sitter JS/TS grammar
+│   │   ├── queue/
+│   │   │   └── upstash_redis_client.py
+│   │   └── observability/
+│   │       ├── langfuse_client.py     # Langfuse SDK wrapper
+│   │       └── tracing.py             # Decorator: @trace_agent
+│   │
+│   └── api/                           # Outer adapter — HTTP routes; imports Application (not Infrastructure directly)
+│       ├── routes/
+│       │   ├── webhooks.py            # POST /webhooks/github
+│       │   ├── reviews.py             # GET /reviews, GET /reviews/{id}
+│       │   ├── repos.py               # GET/PATCH /repos, GET /repos/{id}/config
+│       │   └── auth.py                # GET /auth/github, GET /auth/callback
+│       ├── middleware/
+│       │   ├── auth_middleware.py     # Validate session JWT
+│       │   └── error_handler.py       # Map domain/app errors to HTTP responses
+│       ├── dependencies/
+│       │   └── container.py           # Wire all use cases with their dependencies
+│       └── schemas/                   # Pydantic v2 request/response models (not domain entities)
+│
+├── worker/
+│   └── main.py                        # Redis queue consumer → RunReviewPipelineUseCase
+│
+├── evals/
+│   ├── golden_prs/                    # 20 synthetic known-bad PRs as JSON fixtures
+│   └── runner.py                      # CLI: `python -m evals.runner`
+│
+├── tests/
+│   ├── unit/                          # Domain + Application layer (no I/O)
+│   ├── integration/                   # Infrastructure layer (real DB/API with test fixtures)
+│   └── e2e/                           # Full webhook-to-comment pipeline tests
+│
+├── Dockerfile
+├── docker-compose.yml                 # backend + worker + postgres + redis (local dev)
+├── pyproject.toml                     # uv/pip deps, ruff, mypy config
+└── .env.example
+```
+
+---
+
+## Backend — Key Architectural Rules
+
+### Dependency Injection (container.py)
+All use case instances are built once in `container.py` and injected via FastAPI `Depends()`.
+No use case instantiates its own dependencies — all deps are constructor-injected interfaces.
+See `backend-standards.mdc` for code examples.
+
+### Error Hierarchy
+```
+DomainError           ← base for all domain rule violations
+ApplicationError      ← use case / orchestration failures
+InfrastructureError   ← wrapped external system errors (DB, API, queue)
+```
+API layer `error_handler.py` maps these to HTTP status codes.
+
+### Agent State (LangGraph)
+`ReviewState` (TypedDict in `infrastructure/ai/graph/state.py`) is the single shared object flowing
+through the graph: `pr_metadata`, `diff_chunks`, `context_chunks` (RAG), `active_agents`
+(set by Supervisor), `findings` (accumulated), `synthesis` (final output).
+
+### Async Webhook Pattern
+`POST /webhooks/github` → validate HMAC → enqueue to Redis → return `202`.
+Worker: `queue.pop()` → `RunReviewPipelineUseCase` → LangGraph → post GitHub comments.
+
+---
+
+## Frontend — Directory Structure
+
+```
+frontend/
+├── src/
+│   ├── app/
+│   │   ├── App.tsx                    # Root component
+│   │   ├── router.tsx                 # React Router v6 routes
+│   │   └── providers.tsx              # QueryClientProvider, AuthProvider, ThemeProvider
+│   │
+│   ├── features/                      # Each feature is self-contained
+│   │   │
+│   │   ├── auth/
+│   │   │   ├── pages/
+│   │   │   │   ├── LoginPage.tsx
+│   │   │   │   └── CallbackPage.tsx   # GitHub OAuth callback handler
+│   │   │   ├── components/
+│   │   │   │   ├── LoginButton.tsx
+│   │   │   │   └── UserMenu.tsx
+│   │   │   ├── hooks/
+│   │   │   │   └── useAuth.ts
+│   │   │   └── store/
+│   │   │       └── authStore.ts       # Zustand: current user, session token
+│   │   │
+│   │   ├── repositories/
+│   │   │   ├── pages/
+│   │   │   │   └── RepositoriesPage.tsx
+│   │   │   ├── components/
+│   │   │   │   ├── RepoList.tsx
+│   │   │   │   ├── RepoCard.tsx
+│   │   │   │   └── AgentConfigPanel.tsx  # Toggle agents per repo
+│   │   │   ├── hooks/
+│   │   │   │   ├── useRepositories.ts
+│   │   │   │   └── useAgentConfig.ts
+│   │   │   └── api/
+│   │   │       └── repositoriesApi.ts
+│   │   │
+│   │   ├── reviews/
+│   │   │   ├── pages/
+│   │   │   │   ├── ReviewHistoryPage.tsx
+│   │   │   │   └── ReviewDetailPage.tsx
+│   │   │   ├── components/
+│   │   │   │   ├── ReviewCard.tsx
+│   │   │   │   ├── FindingList.tsx
+│   │   │   │   ├── FindingItem.tsx
+│   │   │   │   ├── SeverityBadge.tsx
+│   │   │   │   └── AgentBreakdown.tsx    # Per-agent finding summary
+│   │   │   ├── hooks/
+│   │   │   │   ├── useReviews.ts
+│   │   │   │   └── useReviewDetail.ts
+│   │   │   └── api/
+│   │   │       └── reviewsApi.ts
+│   │   │
+│   │   └── dashboard/
+│   │       ├── pages/
+│   │       │   └── DashboardPage.tsx
+│   │       ├── components/
+│   │       │   ├── StatCard.tsx
+│   │       │   ├── RecentReviewsList.tsx
+│   │       │   └── SeverityDistributionChart.tsx
+│   │       └── hooks/
+│   │           └── useDashboardStats.ts
+│   │
+│   ├── shared/
+│   │   ├── components/                # Reusable UI primitives (shadcn/ui wrappers)
+│   │   │   ├── Button.tsx
+│   │   │   ├── Badge.tsx
+│   │   │   ├── Card.tsx
+│   │   │   ├── DataTable.tsx
+│   │   │   ├── Spinner.tsx
+│   │   │   └── EmptyState.tsx
+│   │   ├── hooks/
+│   │   │   ├── useToast.ts
+│   │   │   └── usePagination.ts
+│   │   ├── layouts/
+│   │   │   ├── AppLayout.tsx          # Sidebar + header shell for authenticated pages
+│   │   │   └── AuthLayout.tsx         # Centered card layout for login
+│   │   ├── types/
+│   │   │   └── api.ts                 # Shared API response types mirroring backend DTOs
+│   │   └── utils/
+│   │       ├── cn.ts                  # Tailwind classname helper
+│   │       └── formatDate.ts
+│   │
+│   ├── config/
+│   │   └── env.ts                     # Typed import.meta.env vars
+│   │
+│   └── main.tsx
+│
+├── index.html
+├── vite.config.ts
+├── tailwind.config.ts
+└── package.json
+```
+
+---
+
+## Frontend — Key Architectural Rules
+
+### State Management Split
+- **TanStack Query** owns all server state (API data, loading, caching, mutations)
+- **Zustand** owns pure client state (auth session, UI preferences)
+- No mixing: never store API data in Zustand
+
+### Feature Boundary Rule
+Features do not import from each other. Cross-feature data goes through `shared/types/`.
+See `frontend-standards.mdc` for code examples.
+
+### API Client Pattern
+Each feature has its own `api/` module using a shared `apiClient` (axios instance with auth interceptor).
+No `fetch()` calls outside of `api/` modules.
+
+---
+
+## Infrastructure Topology
+
+```
+GitHub  →  Render (FastAPI API)  →  Upstash Redis  →  Render (Worker)
+                ↓                                           ↓
+           Neon Postgres + pgvector              Google AI (Gemini 2.5 Flash)
+                ↓                                           ↓
+           Langfuse Cloud (tracing)                  Langfuse Cloud (tracing)
+
+Vercel (React SPA)  →  Render (FastAPI API)
+```
+
+### Environment Separation
+- `development`: Docker Compose (local Postgres + Redis)
+- `staging`: Render preview deploys, Neon branch DB
+- `production`: Render web service + worker, Neon main DB, Upstash production
+
+---
+
+## API Versioning
+
+All routes prefixed `/api/v1/`. Breaking changes increment to `/api/v2/` with a deprecation period.
+
+| Route | Method | Description |
+|---|---|---|
+| `/api/v1/webhooks/github` | POST | GitHub App event receiver |
+| `/api/v1/auth/github` | GET | Redirect to GitHub OAuth |
+| `/api/v1/auth/callback` | GET | OAuth callback, issue session JWT |
+| `/api/v1/repos` | GET | List installed repos for current user |
+| `/api/v1/repos/{id}/config` | GET / PATCH | Read / update agent config for a repo |
+| `/api/v1/reviews` | GET | Paginated reviews (filter by repo) |
+| `/api/v1/reviews/{id}` | GET | Single review with full findings |
+| `/api/v1/jobs/{id}` | GET | Review job status |
+
+---
+
+## Auth Strategy
+
+**Method:** Signed JWT (HS256, 7-day expiry) issued after GitHub OAuth callback.
+
+```
+GitHub OAuth → GET /auth/callback → issue JWT → frontend stores in localStorage
+All API routes (except /webhooks and /auth) → validate Bearer JWT in auth_middleware.py
+```
+
+JWT payload: `{ sub: user_id, github_id, login, exp }`
+
+JWT secret: `≥256-bit random` stored in `JWT_SECRET` env var. Rotating the secret
+invalidates all active sessions (acceptable for v1).
+
+Webhook auth is **separate**: `X-Hub-Signature-256` HMAC-SHA256 validated in
+`webhooks.py` before any processing. See `schema.mdc` for full flow.
+
+---
+
+## Error Handling & Structured Logging
+
+### Error Hierarchy
+
+```
+DomainError(Exception)
+  └── EntityNotFoundError
+  └── BusinessRuleViolationError
+
+ApplicationError(Exception)
+  └── UseCaseError
+
+InfrastructureError(Exception)
+  └── DatabaseError
+  └── ExternalServiceError     ← GitHub API, Gemini API, Redis
+```
+
+`error_handler.py` in API layer catches all three and maps to HTTP responses + the
+consistent error JSON shape defined in `schema.mdc`.
+
+### Structured Logging
+
+Use Python's `structlog` library. Every log entry is a JSON object with fixed fields:
+
+```json
+{
+  "timestamp": "ISO8601",
+  "level": "info|warning|error",
+  "event": "review_job_started",
+  "job_id": "uuid",
+  "repo": "owner/name",
+  "pr_number": 42,
+  "agent": "security",
+  "duration_ms": 1240
+}
+```
+
+Rules:
+- **Never log**: JWT secrets, access tokens, raw GitHub payloads with user data
+- **Always log**: job_id + repo + pr_number on every agent log entry (correlation)
+- **Error logs**: include `exc_info=True` for stack trace; include `error_code` matching API error code
+- Worker logs stream to Render's log drain; API logs do the same
+
+---
+
+## LLM Integration Layer
+
+### Gemini Client (`infrastructure/ai/gemini_client.py`)
+
+Wraps the Google Generative AI SDK. All agent nodes call through this client — never
+import the SDK directly in agent files.
+
+```python
+class GeminiClient:
+    async def generate(self, prompt: str, schema: type[BaseModel]) -> BaseModel: ...
+    async def embed(self, text: str) -> list[float]: ...
+```
+
+### Rate Limit Handling
+
+Gemini 2.5 Flash free tier: **1,500 requests/day, 10 RPM**.
+
+- On `429 ResourceExhausted`: exponential backoff with jitter — 2s, 8s, 32s (max 3 retries)
+- After 3 failures: raise `ExternalServiceError` → worker marks job `failed`
+- Add `X-RateLimit-*` logging on every Gemini response to track daily usage
+- Never hardcode API key — always read from `GEMINI_API_KEY` env var
+
+### Structured Output
+
+All agent nodes use Gemini's structured output mode (JSON schema enforcement via
+`response_mime_type="application/json"` + Pydantic model). This eliminates parsing
+failures from free-form LLM output.
+
+```python
+# BAD — parse free-form text
+result = await gemini.generate("Find security issues...")
+findings = json.loads(result.text)   # ❌ fragile
+
+# GOOD — structured output
+class SecurityOutput(BaseModel):
+    findings: list[Finding]
+
+result = await gemini_client.generate(prompt, schema=SecurityOutput)  # ✅ typed
+```
+
+### Langfuse Tracing
+
+One Langfuse trace per PR review; one span per agent node. The `@trace_agent` decorator
+in `infrastructure/observability/tracing.py` handles this automatically.
+
+```python
+@trace_agent(name="security_agent")
+async def run(self, state: ReviewState) -> ReviewState:
+    ...  # span opened/closed, tokens + latency recorded automatically
+```
+
+---
+
+## Review Package Assembly
+
+Before any agent runs, the worker assembles a structured **Review Package** from the raw
+PR data. This is done in `RunReviewPipelineUseCase` and stored in `ReviewState`.
+
+### Structure
+
+```
+ReviewPackage
+├── pr_metadata
+│   ├── title, description, author
+│   ├── base_sha, head_sha, base_branch, head_branch
+│   └── changed_files: list[{path, status: added|modified|deleted, additions, deletions}]
+│
+├── context_units: list[ContextUnit]       ← one per function/class containing ≥1 changed line
+│   ├── file_path
+│   ├── node_type: "function" | "class" | "module"
+│   ├── node_name
+│   ├── start_line, end_line
+│   ├── body_old: str                      ← complete old version (from base_sha)
+│   ├── body_new: str                      ← complete new version (from head_sha)
+│   └── diff_patch: str                    ← unified diff for this unit only
+│
+└── rag_chunks: dict[AgentType, list[CodeChunk]]   ← populated per-agent before its run
+    ├── security → top-5 auth/crypto/input-handling functions
+    ├── perf     → top-5 DB/loop/IO functions
+    ├── arch     → top-5 import/class-hierarchy chunks
+    └── test     → top-5 test files related to changed modules
+```
+
+### Assembly Pipeline
+
+```
+1. Fetch raw diff from GitHub (base_sha → head_sha)
+2. For each changed file:
+   a. Fetch new file content (head_sha)
+   b. Fetch old file content (base_sha) — skip for added files
+   c. Parse both with tree-sitter → extract function/class nodes
+   d. Identify which nodes contain ≥1 changed line (by line range intersection)
+   e. Build ContextUnit: body_old, body_new, diff_patch for that node
+3. Embed all new file content → store in code_embeddings (if not already for this SHA)
+4. SupervisorAgent reads context_units metadata (file types, node names) → decides active agents
+5. Before each specialist agent runs → query pgvector with agent-specific query → populate rag_chunks
+```
+
+### Large Function Handling
+
+Functions >300 lines are trimmed to preserve the context budget:
+```
+signature + first 30 lines
+...
+[N changed lines ± 10 lines of surrounding context]
+...
+last 5 lines before return statement
+```
+
+### Large PR Handling (>50 changed files)
+
+Split context_units into batches of 10 files. Each agent is called once per batch.
+SynthesisAgent receives all batch findings and deduplicates across batches.
+
+### Embedding Cleanup
+
+On `pull_request.closed` webhook:
+```sql
+DELETE FROM code_embeddings
+WHERE repository_id = $repo_id AND commit_sha = $head_sha
+```
+Weekly background cleanup removes rows older than 30 days as a safety net.

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "pwsh -NoProfile -NonInteractive -File .cursor/hooks/pre-commit-review.ps1",
+        "matcher": "git\\s+commit",
+        "failClosed": false,
+        "timeout": 15
+      }
+    ]
+  }
+}

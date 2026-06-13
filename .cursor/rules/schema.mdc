@@ -1,0 +1,454 @@
+---
+description: PostgreSQL DB schema, pgvector setup, indexes, and Pydantic v2 DTOs for all API endpoints
+alwaysApply: true
+---
+
+# Database Schema & DTOs
+
+## PostgreSQL Tables (Neon + pgvector)
+
+### users
+
+Stores GitHub OAuth-authenticated dashboard users.
+
+```sql
+id                      UUID PRIMARY KEY DEFAULT gen_random_uuid()
+github_id               BIGINT UNIQUE NOT NULL
+login                   VARCHAR(255) NOT NULL
+email                   VARCHAR(255)
+avatar_url              VARCHAR(512)
+access_token_encrypted  TEXT                         -- AES-256 encrypted
+created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+```
+
+### github_installations
+
+One row per GitHub App installation (org or personal account).
+
+```sql
+id                        UUID PRIMARY KEY DEFAULT gen_random_uuid()
+installation_id           BIGINT UNIQUE NOT NULL     -- GitHub's installation ID
+account_login             VARCHAR(255) NOT NULL
+account_type              VARCHAR(50) NOT NULL        -- 'org' | 'user'
+account_avatar_url        VARCHAR(512)
+access_token_encrypted    TEXT                        -- cached installation token (encrypted)
+access_token_expires_at   TIMESTAMPTZ
+created_at                TIMESTAMPTZ NOT NULL DEFAULT now()
+updated_at                TIMESTAMPTZ NOT NULL DEFAULT now()
+```
+
+### repositories
+
+Repos with the GitHub App installed; each repo belongs to one installation.
+
+```sql
+id               UUID PRIMARY KEY DEFAULT gen_random_uuid()
+github_id        BIGINT UNIQUE NOT NULL
+installation_id  UUID NOT NULL REFERENCES github_installations(id) ON DELETE CASCADE
+owner            VARCHAR(255) NOT NULL
+name             VARCHAR(255) NOT NULL
+full_name        VARCHAR(512) NOT NULL               -- "owner/name"
+default_branch   VARCHAR(255) NOT NULL DEFAULT 'main'
+is_active        BOOLEAN NOT NULL DEFAULT true       -- review on/off per repo
+language         VARCHAR(100)                        -- primary language (nullable)
+created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+```
+
+### agent_configs
+
+Per-repo agent toggles. 1:1 with repositories; created automatically on install.
+
+```sql
+id                UUID PRIMARY KEY DEFAULT gen_random_uuid()
+repository_id     UUID UNIQUE NOT NULL REFERENCES repositories(id) ON DELETE CASCADE
+security_enabled  BOOLEAN NOT NULL DEFAULT true
+perf_enabled      BOOLEAN NOT NULL DEFAULT true
+arch_enabled      BOOLEAN NOT NULL DEFAULT true
+test_enabled      BOOLEAN NOT NULL DEFAULT true
+min_severity      VARCHAR(50) NOT NULL DEFAULT 'medium'  -- minimum severity to post comment
+created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+```
+
+### review_jobs
+
+Async job queue state. Written by webhook handler; consumed by worker.
+Idempotency key: UNIQUE(repository_id, head_sha) — prevents duplicate reviews for the same commit.
+
+```sql
+id              UUID PRIMARY KEY DEFAULT gen_random_uuid()
+repository_id   UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE
+pr_number       INTEGER NOT NULL
+pr_title        VARCHAR(512) NOT NULL
+pr_author       VARCHAR(255) NOT NULL
+pr_url          VARCHAR(512) NOT NULL
+base_sha        VARCHAR(40) NOT NULL
+head_sha        VARCHAR(40) NOT NULL
+status          VARCHAR(50) NOT NULL DEFAULT 'pending'  -- pending|running|completed|failed
+attempt_count   INTEGER NOT NULL DEFAULT 0              -- max 3 (exponential backoff)
+error_message   TEXT
+enqueued_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+started_at      TIMESTAMPTZ
+completed_at    TIMESTAMPTZ
+created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+UNIQUE(repository_id, head_sha)
+```
+
+### reviews
+
+Completed review output. 1:1 with review_jobs.
+
+```sql
+id                 UUID PRIMARY KEY DEFAULT gen_random_uuid()
+job_id             UUID UNIQUE NOT NULL REFERENCES review_jobs(id) ON DELETE CASCADE
+repository_id      UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE
+pr_number          INTEGER NOT NULL
+head_sha           VARCHAR(40) NOT NULL
+pr_url             VARCHAR(512) NOT NULL
+summary            TEXT                                -- overall review summary text
+total_findings     INTEGER NOT NULL DEFAULT 0
+critical_count     INTEGER NOT NULL DEFAULT 0
+high_count         INTEGER NOT NULL DEFAULT 0
+medium_count       INTEGER NOT NULL DEFAULT 0
+low_count          INTEGER NOT NULL DEFAULT 0
+info_count         INTEGER NOT NULL DEFAULT 0
+agents_run         JSONB NOT NULL DEFAULT '[]'         -- list[AgentType] that ran
+langfuse_trace_id  VARCHAR(255)
+posted_to_github   BOOLEAN NOT NULL DEFAULT false
+created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+```
+
+### findings
+
+Individual line-level review findings. Many per review.
+
+```sql
+id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+review_id           UUID NOT NULL REFERENCES reviews(id) ON DELETE CASCADE
+severity            VARCHAR(50) NOT NULL        -- critical|high|medium|low|info
+category            VARCHAR(50) NOT NULL        -- security|perf|arch|test
+agent_source        VARCHAR(50) NOT NULL        -- which agent produced this finding
+file_path           VARCHAR(512) NOT NULL
+line_start          INTEGER
+line_end            INTEGER
+title               VARCHAR(512) NOT NULL
+description         TEXT NOT NULL
+fix_suggestion      TEXT
+github_comment_id   BIGINT                      -- set after posting to GitHub
+created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+```
+
+### code_embeddings
+
+Chunked file embeddings for RAG context retrieval (pgvector extension required).
+
+```sql
+id               UUID PRIMARY KEY DEFAULT gen_random_uuid()
+repository_id    UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE
+commit_sha       VARCHAR(40) NOT NULL
+file_path        VARCHAR(512) NOT NULL
+chunk_index      INTEGER NOT NULL
+content          TEXT NOT NULL
+embedding        VECTOR(768)                    -- Gemini text-embedding-004 (768 dims)
+node_type        VARCHAR(100)                   -- function|class|module (from tree-sitter)
+node_name        VARCHAR(255)
+language         VARCHAR(100)
+created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+UNIQUE(repository_id, commit_sha, file_path, chunk_index)
+```
+
+---
+
+## Indexes
+
+```sql
+CREATE INDEX idx_review_jobs_repo     ON review_jobs(repository_id);
+CREATE INDEX idx_review_jobs_status   ON review_jobs(status);
+CREATE INDEX idx_reviews_repo         ON reviews(repository_id);
+CREATE INDEX idx_reviews_pr           ON reviews(repository_id, pr_number);
+CREATE INDEX idx_findings_review      ON findings(review_id);
+CREATE INDEX idx_findings_severity    ON findings(severity);
+CREATE INDEX idx_embeddings_repo      ON code_embeddings(repository_id, commit_sha);
+CREATE INDEX idx_embeddings_vector    ON code_embeddings
+  USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+```
+
+---
+
+## FK Relationships
+
+```
+github_installations  1:N  repositories     (installation_id)  CASCADE
+repositories          1:1  agent_configs    (repository_id)    CASCADE
+repositories          1:N  review_jobs      (repository_id)    CASCADE
+repositories          1:N  code_embeddings  (repository_id)    CASCADE
+review_jobs           1:1  reviews          (job_id)           CASCADE
+reviews               1:N  findings         (review_id)        CASCADE
+```
+
+---
+
+## Future Tables (extensibility hooks — not in MVP)
+
+| Table              | Feature               | Notes                                                            |
+| ------------------ | --------------------- | ---------------------------------------------------------------- |
+| `organizations`    | EX-01 Multi-tenant    | Add `org_id` FK to users, repos, reviews; enable Postgres RLS    |
+| `finding_feedback` | EX-09 False Positives | FK to findings + users; stores dismissal reason                  |
+| `eval_runs`        | F-08 Evals            | Precision/recall per agent category; linked Langfuse dataset run |
+| `eval_results`     | F-08 Evals            | Per golden-PR score; FK to eval_runs + reviews                   |
+
+---
+
+## Pydantic v2 DTOs
+
+### Auth
+
+```python
+# GET /api/v1/auth/callback response
+class UserDTO(BaseModel):
+    id: UUID
+    github_id: int
+    login: str
+    avatar_url: str | None
+
+class AuthTokenDTO(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    user: UserDTO
+```
+
+### Repositories
+
+```python
+# GET /api/v1/repos/{id}/config  GET + PATCH
+class AgentConfigDTO(BaseModel):
+    repository_id: UUID
+    security_enabled: bool
+    perf_enabled: bool
+    arch_enabled: bool
+    test_enabled: bool
+    min_severity: str                          # Severity enum value
+
+class UpdateAgentConfigRequest(BaseModel):     # PATCH body — all fields optional
+    security_enabled: bool | None = None
+    perf_enabled: bool | None = None
+    arch_enabled: bool | None = None
+    test_enabled: bool | None = None
+    min_severity: str | None = None
+
+class RepoDTO(BaseModel):
+    id: UUID
+    github_id: int
+    full_name: str
+    default_branch: str
+    is_active: bool
+    language: str | None
+    agent_config: AgentConfigDTO               # always embedded
+```
+
+### Reviews
+
+```python
+# GET /api/v1/reviews  (list item)
+class FindingDTO(BaseModel):
+    id: UUID
+    severity: str
+    category: str
+    agent_source: str
+    file_path: str
+    line_start: int | None
+    line_end: int | None
+    title: str
+    description: str
+    fix_suggestion: str | None
+
+class ReviewSummaryDTO(BaseModel):
+    id: UUID
+    pr_number: int
+    pr_url: str
+    head_sha: str
+    total_findings: int
+    critical_count: int
+    high_count: int
+    medium_count: int
+    low_count: int
+    info_count: int
+    agents_run: list[str]
+    posted_to_github: bool
+    created_at: datetime
+
+# GET /api/v1/reviews/{id}  (full detail)
+class ReviewDetailDTO(ReviewSummaryDTO):
+    summary: str | None
+    langfuse_trace_id: str | None
+    findings: list[FindingDTO]
+```
+
+### Jobs
+
+```python
+# GET /api/v1/jobs/{id}
+class JobStatusDTO(BaseModel):
+    id: UUID
+    pr_number: int
+    pr_url: str
+    head_sha: str
+    status: str                                # JobStatus enum value
+    attempt_count: int
+    error_message: str | None
+    enqueued_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+```
+
+### Shared
+
+```python
+# Wraps all paginated list responses
+class PaginatedResponse(BaseModel, Generic[T]):
+    items: list[T]
+    total: int
+    page: int
+    limit: int
+    has_next: bool
+```
+
+---
+
+## Enum Values (domain value objects — used in DB + DTOs)
+
+```python
+class Severity(str, Enum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+class AgentType(str, Enum):
+    SECURITY = "security"
+    PERF = "perf"
+    ARCH = "arch"
+    TEST = "test"
+
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+```
+
+---
+
+## API Contract
+
+All routes are prefixed `/api/v1/`. Auth is a Bearer JWT issued at `/auth/callback`.
+Webhook auth uses `X-Hub-Signature-256` HMAC validation (not Bearer).
+
+### Endpoints
+
+| Method  | Path                 | Auth                  | Request body / Query params | Success response                          |
+| ------- | -------------------- | --------------------- | --------------------------- | ----------------------------------------- |
+| `POST`  | `/webhooks/github`   | GitHub HMAC signature | Raw webhook payload         | `202 Accepted`                            |
+| `GET`   | `/auth/github`       | None                  | —                           | `302` redirect to GitHub OAuth            |
+| `GET`   | `/auth/callback`     | None                  | `?code=&state=`             | `200 AuthTokenDTO`                        |
+| `GET`   | `/repos`             | Bearer JWT            | —                           | `200 list[RepoDTO]`                       |
+| `GET`   | `/repos/{id}/config` | Bearer JWT            | —                           | `200 AgentConfigDTO`                      |
+| `PATCH` | `/repos/{id}/config` | Bearer JWT            | `UpdateAgentConfigRequest`  | `200 AgentConfigDTO`                      |
+| `GET`   | `/reviews`           | Bearer JWT            | `?repo_id=&page=1&limit=20` | `200 PaginatedResponse[ReviewSummaryDTO]` |
+| `GET`   | `/reviews/{id}`      | Bearer JWT            | —                           | `200 ReviewDetailDTO`                     |
+| `GET`   | `/jobs/{id}`         | Bearer JWT            | —                           | `200 JobStatusDTO`                        |
+
+### Error Response Shape (consistent across all endpoints)
+
+```json
+{
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "Review with id 'abc-123' not found.",
+    "details": {}
+  }
+}
+```
+
+- `code` — machine-readable string constant (see table below)
+- `message` — human-readable description, safe to display in UI
+- `details` — optional object with field-level validation errors (VALIDATION_ERROR only)
+
+### Error Codes
+
+| HTTP Status | Error Code         | When used                                                                 |
+| ----------- | ------------------ | ------------------------------------------------------------------------- |
+| `400`       | `BAD_REQUEST`      | Malformed request body or query params                                    |
+| `401`       | `UNAUTHORIZED`     | Missing or invalid Bearer JWT                                             |
+| `403`       | `FORBIDDEN`        | Valid JWT but insufficient permission (wrong repo owner)                  |
+| `404`       | `NOT_FOUND`        | Resource does not exist                                                   |
+| `409`       | `CONFLICT`         | Duplicate resource (e.g. re-review same commit SHA before completion)     |
+| `422`       | `VALIDATION_ERROR` | Pydantic validation failed; `details` contains field errors               |
+| `429`       | `RATE_LIMITED`     | Gemini API rate limit hit; client should retry after `Retry-After` header |
+| `500`       | `INTERNAL_ERROR`   | Unexpected server error; do not expose stack trace                        |
+| `502`       | `UPSTREAM_ERROR`   | GitHub API or Gemini API returned an unexpected error                     |
+
+### Validation Error Details Shape
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Request body validation failed.",
+    "details": {
+      "fields": [
+        {
+          "field": "min_severity",
+          "message": "must be one of: critical, high, medium, low, info"
+        }
+      ]
+    }
+  }
+}
+```
+
+### Auth Flow
+
+```
+1. Frontend redirects user to GET /api/v1/auth/github
+2. Backend redirects to https://github.com/login/oauth/authorize?...
+3. GitHub redirects back to GET /api/v1/auth/callback?code=...&state=...
+4. Backend exchanges code for GitHub token, fetches user profile
+5. Backend issues signed JWT (HS256, 7-day expiry) with { sub: user_id, github_id, login }
+6. Frontend stores JWT in localStorage; attaches as Authorization: Bearer <token>
+7. All /api/v1/* routes (except /webhooks/github and /auth/*) require valid JWT
+```
+
+### Webhook Event Routing
+
+| `action` field | What we do                                                              |
+| -------------- | ----------------------------------------------------------------------- |
+| `opened`       | Enqueue review job                                                      |
+| `synchronize`  | Enqueue review job (full base→head diff)                                |
+| `reopened`     | Enqueue review job                                                      |
+| `closed`       | Enqueue embedding cleanup job (delete `code_embeddings` for `head_sha`) |
+| anything else  | Acknowledge (202) and discard                                           |
+
+### Webhook Signature Validation
+
+```
+1. Receive POST /api/v1/webhooks/github
+2. Compute HMAC-SHA256(body_bytes, GITHUB_WEBHOOK_SECRET)
+3. Compare with X-Hub-Signature-256 header (constant-time comparison)
+4. Reject with 401 if mismatch — never process unsigned webhooks
+5. Return 202 immediately after enqueuing; do not await pipeline completion
+```
+
+### Rate Limit Handling (Gemini API)
+
+When the Gemini API returns a 429:
+
+- Retry up to 3 times with exponential backoff: 2s, 8s, 32s
+- If all retries fail, mark `review_job.status = 'failed'` with `error_message`
+- The worker will not retry automatically (already at max attempts)
+- Surface the failure in the dashboard job status view

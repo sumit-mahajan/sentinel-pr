@@ -1,0 +1,30 @@
+{
+  "action": "opened",
+  "installation": {
+    "id": 12345678
+  },
+  "repository": {
+    "id": 987654321,
+    "name": "backend",
+    "full_name": "acme-corp/backend",
+    "default_branch": "main",
+    "language": "Python",
+    "owner": {
+      "login": "acme-corp"
+    }
+  },
+  "pull_request": {
+    "number": 42,
+    "title": "Fix auth handler",
+    "html_url": "https://github.com/acme-corp/backend/pull/42",
+    "user": {
+      "login": "john"
+    },
+    "base": {
+      "sha": "aaa1111111111111111111111111111111111111111"
+    },
+    "head": {
+      "sha": "bbb2222222222222222222222222222222222222222"
+    }
+  }
+}

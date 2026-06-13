@@ -1,0 +1,197 @@
+---
+description: How to implement initially planned features in this app
+alwaysApply: true
+---
+
+# Project Build Workflow
+
+## Ground Rules
+
+- Execute steps sequentially. Never proceed without explicit user confirmation.
+- At the end of every session, update `session-state.mdc` before stopping.
+- At the start of every session, read `session-state.mdc`, `features.mdc`,
+  `architecture.mdc`, and `decisions.mdc` before taking any action.
+- Never contradict a locked `.mdc` file without flagging the conflict
+  explicitly and getting confirmation to update it.
+
+---
+
+## Step 0 — Clarifying Questions
+
+Ask all ambiguous questions upfront. Cover:
+
+- Who are the users and what's the core user journey?
+- Any hard constraints (auth required? multi-tenant? offline support?)
+- Preferred languages/frameworks if not specified
+- Success criteria — what does "done" look like for v1?
+
+Do not proceed until all questions are answered.
+
+---
+
+## Step 1 — Lock Features (`features.mdc`)
+
+Create `features.mdc` with two sections:
+
+**Core (building now):**
+
+- Exhaustive list of v1 features with acceptance criteria per feature
+- Each feature tagged with priority (P0/P1/P2)
+
+**Extensible (future, not building):**
+
+- List of anticipated future features
+- Note any architectural decisions that must be made now to support them later
+
+Confirm with user before locking.
+
+---
+
+## Step 2 — Lock Architecture (`architecture.mdc` + `decisions.mdc`)
+
+**`architecture.mdc`** must define:
+
+- Backend: Clean Architecture layers
+  (Entities → Use Cases → Interface Adapters → Infrastructure)
+- Frontend: Feature-based structure
+  (pages / components / hooks / store / services per feature)
+- Auth strategy
+- Error handling pattern and structured logging approach
+- Observability plan (what gets logged, how errors surface in free-tier hosting)
+- LLM integration layer (model: Gemini 3.5 Flash or newer with equal/more
+  free limits; fallback strategy on rate limits)
+
+**`decisions.mdc`** must record every non-obvious decision as:
+
+```
+Decision: [what]
+Context: [why this was needed]
+Alternatives considered: [what else was evaluated]
+Rejected because: [concrete reason]
+```
+
+Confirm with user before locking.
+
+---
+
+## Step 2.5 — Initialize Session State (`session-state.mdc`)
+
+Create `session-state.mdc` with:
+
+```
+Last completed step: 2
+Current in-progress: —
+Decisions made this session: [list]
+Open questions / blockers: [list]
+Next immediate action: Start Step 3
+```
+
+Update this file at the end of every session without being asked.
+
+---
+
+## Step 3 — Lock Data Contracts (`schema.mdc`)
+
+Define and lock:
+
+- DB schema (tables, columns, types, indexes, FK constraints)
+  - Include soft delete, created_at/updated_at on all entities
+  - Flag fields added only for future extensibility
+- DTOs (request/response shapes per endpoint)
+- API contract (OpenAPI spec or equivalent)
+  - All endpoints, methods, auth requirements, request/response schemas
+  - Error response shapes must be consistent across all endpoints
+
+No implementation starts until schema and API contract are locked.
+Confirm with user before locking.
+
+---
+
+## Step 4 — Workspace Setup
+
+1. Verify or create skill/reference files needed for accurate implementation
+2. Create `reviewer.mdc` with an explicit review checklist (see below)
+3. Confirm tooling: linter, formatter, test runner configured
+
+**`reviewer.mdc` checklist (run against every git diff before commit):**
+
+- [ ] No business logic in controllers/route handlers
+- [ ] No direct DB calls outside the repository/data layer
+- [ ] All endpoints have auth checks where required
+- [ ] No secrets or credentials in code
+- [ ] DTOs validated at the boundary (not inside use cases)
+- [ ] Every new function has at least one unit test
+- [ ] Error responses match the locked error shape from schema.mdc
+- [ ] No deviation from architecture.mdc layer boundaries
+- [ ] No new external dependency added without updating decisions.mdc
+
+Confirm with user before proceeding.
+
+---
+
+## Step 4.5 — Lock Deployment Config
+
+Define before writing any feature code:
+
+- Hosting targets:
+  - Frontend → Vercel (free)
+  - Backend → Render or Railway free tier (document cold start behavior)
+  - DB → Neon Postgres free tier
+  - Vector DB (if needed) → Pinecone free tier (2GB, no expiry)
+  - LLM → Gemini free tier via AI Studio (1,500 RPD; add retry/backoff
+    for 429s; never hardcode API keys client-side)
+- Dockerfile or platform config committed to repo
+- `.env.example` with all required vars (no values)
+- Before pushing, build and test apps
+
+Confirm with user before proceeding.
+
+---
+
+## Step 5 — Incremental Feature Build
+
+For each feature:
+
+1. Write the contract first (function signatures, interfaces) — confirm
+2. Write tests against the contract (before implementation)
+3. Implement until tests pass
+4. Run reviewer.mdc checklist against git diff
+5. Confirm with user before marking feature done and moving to next
+
+**Definition of done per feature:**
+
+- Unit tests pass
+- Integration test for the happy path passes
+- Reviewer checklist passes with no unchecked items
+- `session-state.mdc` updated
+
+**Batching rule:** Once 2-3 features are complete and patterns are
+stable, related features in the same domain/layer may be batched.
+Never batch across architectural boundaries.
+
+---
+
+## Proceed Protocol
+
+When the user says "proceed", "proceed to next", "continue", or any equivalent:
+
+1. **Commit first** — stage all changed files and create a commit with a clear message
+   describing what was just completed (e.g. `feat: F-01 GitHub App webhook integration`).
+   Do not start the next step until the commit succeeds.
+2. **Then start the next step** — begin immediately after the commit, without waiting for
+   additional confirmation.
+
+Commit message format: `feat: <feature-id> <short description>` (e.g. `feat: F-05 async worker system`).
+Use `chore:` for setup/config steps (e.g. `chore: Step 4.5 deployment config`).
+
+---
+
+## Session Resume Protocol
+
+At the start of any new session, before any action:
+
+1. Read `session-state.mdc`
+2. Read `features.mdc`
+3. Read `architecture.mdc`
+4. Read `decisions.mdc`
+5. Summarize current state to user and confirm what to work on next
