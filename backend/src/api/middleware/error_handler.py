@@ -4,13 +4,17 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from api.schemas.errors import ErrorBody, ErrorResponse
-from domain.errors import DomainError, EntityNotFoundError, InfrastructureError
+from domain.errors import DomainError, EntityNotFoundError, ForbiddenError, InfrastructureError
 
 
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(EntityNotFoundError)
     async def entity_not_found_handler(_: Request, exc: EntityNotFoundError) -> JSONResponse:
         return _error_response(404, "NOT_FOUND", str(exc))
+
+    @app.exception_handler(ForbiddenError)
+    async def forbidden_error_handler(_: Request, exc: ForbiddenError) -> JSONResponse:
+        return _error_response(403, "FORBIDDEN", str(exc))
 
     @app.exception_handler(DomainError)
     async def domain_error_handler(_: Request, exc: DomainError) -> JSONResponse:
@@ -39,6 +43,8 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def http_exception_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
         code = _status_to_code(exc.status_code)
         message = str(exc.detail) if exc.detail else "Request failed"
+        if isinstance(exc.detail, dict):
+            message = str(exc.detail.get("message", message))
         return _error_response(exc.status_code, code, message)
 
 

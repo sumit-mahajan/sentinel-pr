@@ -1,10 +1,12 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.entities.repository import Repository
+from domain.errors import EntityNotFoundError
 from domain.repositories.i_repo_repository import IRepoRepository, UpsertRepositoryParams
+from infrastructure.db.models.installation import GithubInstallationORM
 from infrastructure.db.models.repository import RepositoryORM
 from infrastructure.db.repositories.mappers import to_repository_entity
 
@@ -49,6 +51,29 @@ class PostgresRepoRepository(IRepoRepository):
             orm.default_branch = params.default_branch
             orm.language = params.language
 
+        await self._session.commit()
+        await self._session.refresh(orm)
+        return to_repository_entity(orm)
+
+    async def list_accessible_for_login(self, login: str) -> list[Repository]:
+        result = await self._session.execute(
+            select(RepositoryORM)
+            .join(GithubInstallationORM, RepositoryORM.installation_id == GithubInstallationORM.id)
+            .where(
+                or_(
+                    RepositoryORM.owner == login,
+                    GithubInstallationORM.account_login == login,
+                )
+            )
+            .order_by(RepositoryORM.full_name)
+        )
+        return [to_repository_entity(orm) for orm in result.scalars().all()]
+
+    async def update_is_active(self, repository_id: UUID, is_active: bool) -> Repository:
+        orm = await self._session.get(RepositoryORM, repository_id)
+        if orm is None:
+            raise EntityNotFoundError(f"Repository {repository_id} not found")
+        orm.is_active = is_active
         await self._session.commit()
         await self._session.refresh(orm)
         return to_repository_entity(orm)

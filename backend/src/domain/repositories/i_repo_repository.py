@@ -37,3 +37,11 @@ class IRepoRepository(ABC):
     @abstractmethod
     async def upsert(self, params: UpsertRepositoryParams) -> Repository:
         """Create or update a repository record."""
+
+    @abstractmethod
+    async def list_accessible_for_login(self, login: str) -> list[Repository]:
+        """Return repos the user can access via installation or ownership."""
+
+    @abstractmethod
+    async def update_is_active(self, repository_id: UUID, is_active: bool) -> Repository:
+        """Enable or disable review for a repository."""

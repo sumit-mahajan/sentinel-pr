@@ -62,6 +62,29 @@ class InMemoryRepoRepository(IRepoRepository):
         self._repos[params.github_id] = updated
         return updated
 
+    async def list_accessible_for_login(self, login: str) -> list[Repository]:
+        return [r for r in self._repos.values() if r.owner == login]
+
+    async def update_is_active(self, repository_id: UUID, is_active: bool) -> Repository:
+        for key, repo in self._repos.items():
+            if repo.id == repository_id:
+                updated = Repository(
+                    id=repo.id,
+                    github_id=repo.github_id,
+                    installation_id=repo.installation_id,
+                    owner=repo.owner,
+                    name=repo.name,
+                    full_name=repo.full_name,
+                    default_branch=repo.default_branch,
+                    is_active=is_active,
+                    language=repo.language,
+                    created_at=repo.created_at,
+                    updated_at=datetime.now(UTC),
+                )
+                self._repos[key] = updated
+                return updated
+        raise EntityNotFoundError(f"Repository {repository_id} not found")
+
 
 class InMemoryJobRepository(IJobRepository):
     def __init__(self) -> None:

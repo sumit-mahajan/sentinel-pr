@@ -1,1 +1,1 @@
-import '@testing-library/jest-dom'
+// Vitest setup — extend here when component tests are added.

@@ -9,8 +9,9 @@ install:
 	@echo "✓ Dependencies installed. Copy .env.example → .env and fill in values."
 
 # ── Local development ─────────────────────────────────────────────────────────
+# docker-compose runs api + worker; Neon + Upstash come from .env (same as prod).
 dev:
-	docker-compose up --build
+	docker compose up --build
 
 dev-api:
 	cd backend && uv run uvicorn src.api.main:app --reload --port 8000

@@ -27,13 +27,22 @@ alwaysApply: true
 
 ## Last Completed Step
 
-Step 4.5 — Deployment config complete. Full project skeleton created. Ready to build features.
+F-04 — Structured Review Output committed (`691dd72`). F-06 built, awaiting review.
 
 ---
 
 ## Current In-Progress
 
-F-02 Multi-Agent Review Pipeline — done. 44/44 tests passing, 79% coverage. Next: F-03 Code Context + RAG.
+F-06 Web Dashboard — backend dashboard API + React SPA complete. Awaiting user review before commit.
+
+---
+
+## Progress
+
+| Step | Status | File(s) |
+|---|-----|---|
+| F-04 Structured Review Output | DONE (committed) | persist_review, post_review_to_github, comment_poster |
+| F-06 Web Dashboard | BUILT (uncommitted) | auth/repos/reviews API routes, React dashboard |
 
 ---
 

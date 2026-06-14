@@ -25,9 +25,14 @@ class Settings(BaseSettings):
         default=None, alias="GITHUB_APP_PRIVATE_KEY_PATH"
     )
     github_webhook_secret: str = Field(default="", alias="GITHUB_WEBHOOK_SECRET")
+    github_client_id: str = Field(default="", alias="GITHUB_CLIENT_ID")
+    github_client_secret: str = Field(default="", alias="GITHUB_CLIENT_SECRET")
 
     jwt_secret: str = Field(default="dev-only-change-me", alias="JWT_SECRET")
+    jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    jwt_expire_days: int = Field(default=7, alias="JWT_EXPIRE_DAYS")
     frontend_url: str = Field(default="http://localhost:5173", alias="FRONTEND_URL")
+    api_base_url: str = Field(default="http://localhost:8000", alias="API_BASE_URL")
 
 
 @lru_cache
