@@ -13,18 +13,17 @@ WORKDIR /app
 
 # Copy dependency files first (layer-cache friendly)
 COPY pyproject.toml ./
-# Copy lockfile if it exists (optional but faster)
-COPY uv.lock* ./
 
-# Install production dependencies only
-RUN uv sync --frozen --no-dev
+# Install production dependencies (no lockfile in repo — omit --frozen)
+RUN uv sync --no-dev
 
 # Copy application source
 COPY src/ ./src/
 COPY worker/ ./worker/
+COPY start.sh ./start.sh
 
 # Non-root user for security
-RUN useradd -m -u 1001 appuser && chown -R appuser /app
+RUN chmod +x start.sh && useradd -m -u 1001 appuser && chown -R appuser /app
 USER appuser
 
 EXPOSE 8000
