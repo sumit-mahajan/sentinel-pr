@@ -1,20 +1,97 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ── Light mode (default) ─────────────────────────────────────────────── */
 :root {
-  --background: 222 47% 6%;
-  --foreground: 210 40% 98%;
-  --primary: 217 91% 60%;
-  --primary-foreground: 222 47% 6%;
-  --muted: 217 33% 17%;
-  --muted-foreground: 215 20% 65%;
-  --destructive: 0 84% 60%;
-  --destructive-foreground: 210 40% 98%;
-  --border: 217 33% 20%;
-  --radius: 0.5rem;
+  --background:           0 0% 100%;
+  --foreground:           240 10% 9%;
+
+  --card:                 0 0% 100%;
+  --card-foreground:      240 10% 9%;
+
+  --primary:              243 75% 59%;
+  --primary-foreground:   0 0% 100%;
+
+  --secondary:            240 5% 96%;
+  --secondary-foreground: 240 10% 9%;
+
+  --muted:                240 5% 96%;
+  --muted-foreground:     240 4% 46%;
+
+  --accent:               240 5% 96%;
+  --accent-foreground:    240 10% 9%;
+
+  --destructive:          0 84% 60%;
+  --destructive-foreground: 0 0% 100%;
+
+  --border:               240 6% 90%;
+  --input:                240 6% 90%;
+  --ring:                 243 75% 59%;
+
+  --radius:               0.5rem;
 }
 
-body {
-  @apply bg-background text-foreground antialiased;
+/* ── Dark mode — toggled via .dark class on <html> ────────────────────── */
+.dark {
+  --background:           240 10% 4%;
+  --foreground:           210 20% 96%;
+
+  --card:                 240 8% 7%;
+  --card-foreground:      210 20% 96%;
+
+  --primary:              243 75% 65%;
+  --primary-foreground:   240 10% 4%;
+
+  --secondary:            240 6% 12%;
+  --secondary-foreground: 210 20% 96%;
+
+  --muted:                240 6% 12%;
+  --muted-foreground:     220 10% 52%;
+
+  --accent:               240 6% 12%;
+  --accent-foreground:    210 20% 96%;
+
+  --destructive:          0 72% 55%;
+  --destructive-foreground: 210 20% 96%;
+
+  --border:               240 6% 15%;
+  --input:                240 6% 15%;
+  --ring:                 243 75% 65%;
+}
+
+/* ── Keyframes ────────────────────────────────────────────────────────── */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+@keyframes fade-in-fast {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes slide-in-right {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0);    }
+}
+
+/* ── Base styles ──────────────────────────────────────────────────────── */
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+
+  /* Smooth theme transition — only on color/background, not transforms */
+  html {
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
 }

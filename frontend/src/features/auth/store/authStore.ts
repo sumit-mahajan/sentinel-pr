@@ -18,6 +18,6 @@ export const useAuthStore = create<AuthState>()(
       setAuth: (token, user) => set({ token, user }),
       clearAuth: () => set({ token: null, user: null }),
     }),
-    { name: 'pr-reviewer-auth' },
+    { name: 'reviewgraph-auth' },
   ),
 );

@@ -1,12 +1,5 @@
-fix: Langfuse v4 API, Gemini schema sanitizer, worker wake architecture
+chore: standardize frontend UI with landing page, dark mode, and branding
 
-- Rewrite LangfuseClient for SDK v4: create_trace_id + start_observation
-  replaces removed trace()/span() methods; add v4 unit test
-- Add _gemini_schema() sanitizer in GeminiClient: strips title/$schema/default,
-  inlines $ref/$defs, rewrites anyOf nullable to {type, nullable:true}
-  (google.generativeai rejects all three Pydantic schema patterns)
-- Orchestrator factory: build LanggraphOrchestrator when GEMINI_API_KEY set
-- Worker wake-on-enqueue architecture: HTTP /wake endpoint, drain/dispatcher split
-- Review graph: sequential specialists -> synthesis (fixes empty findings race)
-- Supervisor: run all agents when code files changed and only 1 agent selected
-- Settings: add GEMINI_API_KEY, Langfuse keys, WORKER_WAKE_URL/SECRET
+Align the dashboard with the locked UI style: public landing at /, app routes
+under /dashboard, theme toggle with flash prevention, responsive nav, skeleton
+loaders, repo settings page, and ReviewGraph branding assets.

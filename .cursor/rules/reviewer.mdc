@@ -14,12 +14,12 @@ those tools cannot detect.
 ## Architecture Layer Boundaries
 
 - [ ] `api/routes/` are thin — **parse input → call one use case → return DTO**. No conditional
-  business logic, no branching on domain state, no direct DB or HTTP calls inside routes.
+      business logic, no branching on domain state, no direct DB or HTTP calls inside routes.
 - [ ] Nothing in `domain/` or `application/` imports from `infrastructure/`, `fastapi`,
-  `sqlalchemy`, `httpx`, `redis`, or any third-party library.
+      `sqlalchemy`, `httpx`, `redis`, or any third-party library.
 - [ ] All GitHub API calls go through `infrastructure/github/` only.
 - [ ] All Gemini calls go through `infrastructure/ai/gemini_client.py` only — agent files
-  must not import `google.generativeai` directly.
+      must not import `google.generativeai` directly.
 - [ ] All queue operations go through `infrastructure/queue/upstash_redis_client.py` only.
 
 ---
@@ -27,46 +27,57 @@ those tools cannot detect.
 ## Security (not caught by detect-private-key)
 
 - [ ] `X-Hub-Signature-256` HMAC is validated **before** any webhook payload is processed.
-  The validation is not behind a feature flag or try/except that swallows failures.
+      The validation is not behind a feature flag or try/except that swallows failures.
 - [ ] Every non-public route (`/repos`, `/reviews`, `/jobs`) calls `auth_middleware` or
-  `Depends(get_current_user)`. Check added routes specifically — no accidentally public endpoints.
+      `Depends(get_current_user)`. Check added routes specifically — no accidentally public endpoints.
 - [ ] Columns ending `_encrypted` in DB writes are AES-256 encrypted before insert. Raw tokens
-  are never passed to the repository layer.
+      are never passed to the repository layer.
 - [ ] No secrets in comments, log messages, or exception strings (detect-private-key catches
-  key patterns but not e.g. `# token was: <value>` comments).
+      key patterns but not e.g. `# token was: <value>` comments).
 
 ---
 
 ## Agent / LangGraph
 
 - [ ] Agent node functions are **pure state transformers** — they receive `ReviewState` and
-  return `ReviewState`. No DB writes, no HTTP calls, no Redis pushes inside agent logic.
-  Side effects belong in the use case layer that wraps the graph run.
+      return `ReviewState`. No DB writes, no HTTP calls, no Redis pushes inside agent logic.
+      Side effects belong in the use case layer that wraps the graph run.
 - [ ] All Gemini calls use structured output (Pydantic schema). No `json.loads(response.text)`.
 - [ ] New agent node has `@trace_agent` decorator. No unwrapped agent functions.
 - [ ] `ReviewState` is the only shared data structure in the graph — no module-level caches,
-  no class-level state on agent nodes.
+      no class-level state on agent nodes.
 
 ---
 
 ## Data / Database
 
 - [ ] No destructive migration in a single step. `DROP COLUMN` requires a prior deprecation
-  migration. `ALTER COLUMN` changing type requires a backfill step first.
+      migration. `ALTER COLUMN` changing type requires a backfill step first.
 - [ ] `UNIQUE(repository_id, head_sha)` on `review_jobs` is not bypassed — no raw INSERT
-  that skips the conflict check.
+      that skips the conflict check.
 - [ ] `pull_request.closed` webhook handler enqueues the embedding cleanup job. If you added
-  a new review trigger path, confirm cleanup is also wired.
+      a new review trigger path, confirm cleanup is also wired.
+
+---
+
+## Concurrency & Reliability
+
+See `architecture.mdc` § Concurrency & Reliability.
+
+- [ ] Webhook path only enqueues — no pipeline/diff/agent work in the request handler
+- [ ] Duplicate PR events for the same `head_sha` do not create a second job
+- [ ] Worker acks Redis messages only after successful dispatch
+- [ ] Persist + GitHub post steps are safe to replay (idempotent guards)
 
 ---
 
 ## Process
 
 - [ ] New external Python or npm dependency added? → recorded in `decisions.mdc` with
-  context and alternatives considered.
+      context and alternatives considered.
 - [ ] New API endpoint added? → `schema.mdc` API contract table updated.
 - [ ] Changed a locked decision (model, hosting, queue, auth)? → flagged in `decisions.mdc`
-  with the reason for change.
+      with the reason for change.
 
 ---
 

@@ -149,6 +149,61 @@ through the graph: `pr_metadata`, `diff_chunks`, `context_chunks` (RAG), `active
 `POST /webhooks/github` → validate HMAC → enqueue to Redis → return `202`.
 Worker: `queue.pop()` → `RunReviewPipelineUseCase` → LangGraph → post GitHub comments.
 
+### Concurrency & Reliability
+
+What we actually run today — not a future scaling playbook.
+
+#### 1. Webhook never runs the pipeline ✅
+
+GitHub POST → validate HMAC → create job + enqueue Redis → return `202`.
+Diff fetch, agents, and GitHub posting happen only in the **worker**. The API process
+can handle other requests while reviews run elsewhere.
+
+#### 2. One job per commit SHA ✅
+
+`review_jobs` has `UNIQUE(repository_id, head_sha)`. Before creating a job,
+`StartReviewUseCase` looks up an existing row — duplicate `synchronize` events or
+GitHub redeliveries skip enqueue (`review_job_idempotent_skip`).
+
+**Gap (not coded yet):** two webhooks for the same SHA at the exact same instant could
+both pass the lookup; the second INSERT would hit the UNIQUE constraint. We should catch
+that and treat it as a skip — the constraint prevents bad data, but the handler doesn't
+catch the error yet.
+
+#### 3. Worker retries are safe to replay ✅
+
+If a job crashes mid-flight, Redis can deliver the message again. Guards in:
+
+- `RunReviewPipelineUseCase` — skip if review already persisted **and** posted to GitHub
+- `PersistReviewUseCase` — skip if review exists for this `job_id`
+- `PostReviewToGithubUseCase` — skip if `posted_to_github=true`
+
+So at-least-once queue delivery does not cause duplicate GitHub comments.
+
+#### 4. Redis queue: ack only on success ✅
+
+Worker uses Redis Streams + consumer group (`XREADGROUP` / `XACK` in `worker/drain.py`).
+Message is acked after dispatch succeeds; on failure it stays in the pending list for
+redelivery. One consumer name (`worker-1`) — **single worker instance** in v1.
+
+#### 5. Job attempts and Gemini backoff ✅
+
+- `attempt_count` on the job row; max **3** attempts (`RunReviewPipelineUseCase`).
+- Failed attempt → job marked `failed`, dispatch returns false → message not acked.
+- Gemini 429 → retry inside `gemini_client.py` (2s / 8s / 32s) before the job fails.
+
+#### 6. Agents run one at a time per job ✅
+
+LangGraph runs Supervisor → specialists → Synthesis **sequentially** (parallel fan-out
+broke synthesis). This also stays under Gemini free-tier RPM (10/min).
+
+#### Not in v1 (don't implement unless asked)
+
+- Multiple worker instances / horizontal scaling
+- Distributed locks or `SELECT FOR UPDATE`
+- IntegrityError handling on concurrent webhook race (recommended small fix)
+- Org-level concurrency caps or priority queues
+
 ---
 
 ## Frontend — Directory Structure

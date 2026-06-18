@@ -29,7 +29,7 @@ export function CallbackPage() {
       .get<AuthTokenDTO>('/auth/callback', { params: { code, state } })
       .then((res) => {
         setAuth(res.data.access_token, res.data.user);
-        navigate('/');
+        navigate('/dashboard');
       })
       .catch(() => navigate('/login'));
   }, [params, navigate, setAuth]);

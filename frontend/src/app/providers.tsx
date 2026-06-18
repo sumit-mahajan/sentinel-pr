@@ -4,7 +4,13 @@ import { Toaster } from 'sonner';
 
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { staleTime: 30_000, retry: 1 },
+    queries: {
+      staleTime:            60 * 1000,       // 1 min — show cached data immediately, revalidate quietly
+      gcTime:               15 * 60 * 1000,  // 15 min — keep data in memory between page visits
+      retry:                1,
+      refetchOnWindowFocus: false,           // don't re-fetch just because the user alt-tabbed back
+      refetchOnReconnect:   true,            // do re-fetch when network comes back
+    },
   },
 });
 

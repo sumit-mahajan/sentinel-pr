@@ -8,12 +8,16 @@ export function UserMenu() {
   if (!user) return null;
 
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex items-center gap-2">
       {user.avatar_url && (
-        <img src={user.avatar_url} alt={user.login} className="h-8 w-8 rounded-full" />
+        <img
+          src={user.avatar_url}
+          alt={user.login}
+          className="h-7 w-7 rounded-full ring-1 ring-border"
+        />
       )}
-      <span className="text-sm">{user.login}</span>
-      <Button variant="ghost" onClick={clearAuth}>
+      <span className="hidden text-sm text-muted-foreground sm:block">{user.login}</span>
+      <Button variant="ghost" size="sm" onClick={clearAuth}>
         Sign out
       </Button>
     </div>

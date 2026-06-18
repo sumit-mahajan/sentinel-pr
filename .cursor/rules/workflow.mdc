@@ -47,6 +47,42 @@ Confirm with user before locking.
 
 ---
 
+## Step 1.5 — Lock UI Style (`ui-style.mdc`)
+
+After features are locked, define the visual language before any frontend code is written.
+Record decisions in `ui-style.mdc`; reference it throughout Step 5. **Defaults below apply to
+every project** unless the user explicitly overrides.
+
+**Lock in `ui-style.mdc`:**
+
+- **Aesthetic** — modern minimal, production-grade startup: clean whitespace, neutral palette,
+  one accent, sharp typography, subtle shadows/borders. No gradients or decorative clutter.
+  Stack: shadcn/ui pattern (Tailwind + HSL CSS vars in `:root`/`.dark` + CVA). Inter via
+  Google Fonts in `index.css`.
+- **Branding** — before any UI code, use `GenerateImage` for a concept-driven icon (never a
+  plain letter): `frontend/public/logo.png` (≥512×512), `favicon.svg`, `og-image.png`
+  (1200×630). Reference logo in nav, login, and `apple-touch-icon`.
+- **`index.html`** — full meta/OG/Twitter tags (`title`, `description`, `theme-color`, `og:*`,
+  `twitter:*`, favicon links). Never ship Vite defaults.
+- **Dark mode** — default light; sun/moon `ThemeToggle` in app header and landing nav; persist
+  `<appname>-theme` in localStorage; `darkMode: 'class'`; inline `<script>` in `index.html`
+  before React mounts to prevent flash; light tokens in `:root`, dark in `.dark` (not media query).
+- **Landing page** — always at `/`, always public (no auto-redirect when signed in). Sections:
+  sticky nav · hero · features · how-it-works · CTA · footer. Signed-in users see "Go to
+  Dashboard →" in nav and hero instead of "Sign in". App routes under `/dashboard`, etc.;
+  post-login redirect to `/dashboard`.
+- **Responsive** — container `max-w-7xl … 2xl:max-w-[1440px]`; hamburger nav on mobile
+  (`hidden md:flex` desktop links); 44px touch targets; `grid-cols-2 lg:grid-cols-4` stat grids;
+  `break-words`/`break-all` on long paths; `3xl: '1920px'` breakpoint.
+- **UX patterns** — skeleton loaders (not spinners) shaped to content; `fade-in` on pages/cards;
+  entire list cards clickable via `<Link>` with inline context; per-item settings on dedicated
+  pages (never inline on list cards); grouped forms use draft + Save/Discard + toasts (sonner),
+  no auto-save; semantic badges with `dark:` variants.
+
+Confirm with user before locking. Once locked, flag any deviation and get confirmation.
+
+---
+
 ## Step 2 — Lock Architecture (`architecture.mdc` + `decisions.mdc`)
 
 **`architecture.mdc`** must define:
@@ -60,6 +96,7 @@ Confirm with user before locking.
 - Observability plan (what gets logged, how errors surface in free-tier hosting)
 - LLM integration layer (model: Gemini 3.5 Flash or newer with equal/more
   free limits; fallback strategy on rate limits)
+- Cover **Concurrency & reliability** — document what is actually implemented; note known gaps explicitly
 
 **`decisions.mdc`** must record every non-obvious decision as:
 
@@ -205,7 +242,7 @@ it and build the next feature."
    - Present the checklist results and a brief summary to the user
    - Wait for explicit approval before committing
 
-"Proceed" approves the *previous* feature. The *next* feature always needs its own
+"Proceed" approves the _previous_ feature. The _next_ feature always needs its own
 review+approval cycle before it is committed.
 
 If the user says "continue" while reviewing or discussing (not advancing the build),
