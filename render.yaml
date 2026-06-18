@@ -1,11 +1,15 @@
 services:
-  # ── FastAPI API server ────────────────────────────────────────────────────
+  # ── API + worker (single free-tier container) ─────────────────────────────
+  # Worker listens on 8001 internally; API wakes it via localhost after enqueue.
   - type: web
     name: pr-reviewer-api
+    plan: free
     env: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    dockerCommand: uv run uvicorn src.api.main:app --host 0.0.0.0 --port $PORT
+    dockerCommand: >-
+      sh -c "uv run uvicorn worker.http:app --host 0.0.0.0 --port 8001 &
+      exec uv run uvicorn src.api.main:app --host 0.0.0.0 --port $PORT"
     healthCheckPath: /health
     autoDeploy: true
     envVars:
@@ -18,7 +22,7 @@ services:
       - key: UPSTASH_REDIS_TOKEN
         sync: false
       - key: WORKER_WAKE_URL
-        sync: false
+        value: http://127.0.0.1:8001/wake
       - key: WORKER_WAKE_SECRET
         sync: false
       - key: GEMINI_API_KEY
@@ -48,40 +52,7 @@ services:
       - key: FRONTEND_URL
         sync: false
 
-  # ── Worker web service (POST /wake → drain Redis; no idle polling) ───────
-  - type: web
-    name: pr-reviewer-worker
-    env: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: uv run uvicorn worker.http:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /health
-    autoDeploy: true
-    envVars:
-      - key: ENVIRONMENT
-        value: production
-      - key: DATABASE_URL
-        sync: false
-      - key: UPSTASH_REDIS_URL
-        sync: false
-      - key: UPSTASH_REDIS_TOKEN
-        sync: false
-      - key: WORKER_WAKE_SECRET
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: GITHUB_APP_ID
-        sync: false
-      - key: GITHUB_APP_PRIVATE_KEY_B64
-        sync: false
-      - key: LANGFUSE_PUBLIC_KEY
-        sync: false
-      - key: LANGFUSE_SECRET_KEY
-        sync: false
-      - key: LANGFUSE_HOST
-        value: https://cloud.langfuse.com
-
-# NOTE: Cold-start behaviour (free tier)
-#   - API + worker web services spin down after 15 min inactivity (~30s cold start)
-#   - POST /wake cold-starts the worker; job is safe in Redis until drain runs
-#   - Webhook returns 202 immediately after enqueue + wake (async)
+# NOTE: Free-tier behaviour
+#   - Single service spins down after 15 min inactivity (~30–60s cold start)
+#   - Webhook returns 202 immediately; job is safe in Redis until drain runs
+#   - Worker runs in-process on port 8001 — no second Render service needed
