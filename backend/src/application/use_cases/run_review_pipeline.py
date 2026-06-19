@@ -8,22 +8,23 @@ Execution order:
   4. Persist results in DB (F-04)
   5. Post review to GitHub (F-04)
   6. Mark job COMPLETED
-  On any exception: increment attempt_count, mark FAILED with error_message.
+  On failure: schedule retry with retry_after, or mark FAILED after max attempts.
 """
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
 
 from application.use_cases.persist_review import PersistReviewUseCase
 from application.use_cases.post_review_to_github import PostReviewToGithubUseCase
-from domain.errors import ApplicationError
 from domain.repositories.i_job_repository import IJobRepository
 from domain.services.i_agent_orchestrator import IAgentOrchestrator
+from domain.value_objects.job_poll import MAX_JOB_ATTEMPTS, RETRY_BACKOFF_SECONDS
 from domain.value_objects.job_status import JobStatus
 
 logger = structlog.get_logger()
 
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = MAX_JOB_ATTEMPTS
 
 
 class RunReviewPipelineUseCase:
@@ -42,8 +43,7 @@ class RunReviewPipelineUseCase:
     async def execute(self, job_id: UUID) -> bool:
         """Run the pipeline for the given job.
 
-        Returns True if the job completed, False if it should be retried later.
-        Raises ApplicationError if the job has exceeded MAX_ATTEMPTS.
+        Returns True if the job completed (or is terminal), False if it should be retried later.
         """
         job = await self._job_repo.get_by_id(job_id)
         if job is None:
@@ -57,9 +57,12 @@ class RunReviewPipelineUseCase:
         )
 
         if job.attempt_count >= MAX_ATTEMPTS:
-            raise ApplicationError(
-                f"Job {job_id} has already reached the maximum of {MAX_ATTEMPTS} attempts"
+            await log.awarning(
+                "worker_job_max_attempts_exceeded",
+                max_attempts=MAX_ATTEMPTS,
+                error_message=job.error_message,
             )
+            return True  # Ack queue message; job is terminal in DB.
 
         # Bump attempt count and mark running.
         await self._job_repo.update_attempt_count(job_id, job.attempt_count + 1)
@@ -102,8 +105,24 @@ class RunReviewPipelineUseCase:
 
         except Exception as exc:  # noqa: BLE001
             error_msg = f"{type(exc).__name__}: {exc}"
-            await self._job_repo.update_status(
-                job_id, JobStatus.FAILED, error_message=error_msg
-            )
-            await log.aerror("worker_job_failed", error=error_msg)
-            return False
+            updated = await self._job_repo.get_by_id(job_id)
+            if updated is not None and updated.attempt_count >= MAX_ATTEMPTS:
+                await self._job_repo.update_status(
+                    job_id, JobStatus.FAILED, error_message=error_msg
+                )
+                await log.aerror("worker_job_failed_terminal", error=error_msg)
+            elif updated is not None:
+                delay_index = min(updated.attempt_count - 1, len(RETRY_BACKOFF_SECONDS) - 1)
+                retry_after = datetime.now(UTC) + timedelta(
+                    seconds=RETRY_BACKOFF_SECONDS[delay_index]
+                )
+                await self._job_repo.schedule_retry(
+                    job_id, retry_after=retry_after, error_message=error_msg
+                )
+                await log.aerror(
+                    "worker_job_failed_retry_scheduled",
+                    error=error_msg,
+                    retry_after=retry_after.isoformat(),
+                    attempt=updated.attempt_count,
+                )
+            return True

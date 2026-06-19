@@ -9,7 +9,9 @@ from domain.repositories.i_installation_repository import IInstallationRepositor
 from domain.repositories.i_repo_repository import IRepoRepository
 from domain.repositories.i_review_repository import IReviewRepository
 from domain.services.i_github_comment_poster import IGithubCommentPoster, ReviewComment
+from domain.services.i_pr_fetcher import IPrFetcher
 from domain.value_objects.severity import Severity, severity_meets_minimum
+from domain.utils.diff_utils import build_diff_line_index, is_comment_on_diff
 
 logger = structlog.get_logger()
 
@@ -22,12 +24,14 @@ class PostReviewToGithubUseCase:
         installation_repo: IInstallationRepository,
         comment_poster: IGithubCommentPoster,
         *,
+        pr_fetcher: IPrFetcher | None = None,
         min_severity: Severity = Severity.MEDIUM,
     ) -> None:
         self._review_repo = review_repo
         self._repo_repo = repo_repo
         self._installation_repo = installation_repo
         self._comment_poster = comment_poster
+        self._pr_fetcher = pr_fetcher
         self._min_severity = min_severity
 
     async def execute(self, review: Review) -> Review:
@@ -56,15 +60,31 @@ class PostReviewToGithubUseCase:
         ]
 
         inline_findings = [f for f in postable if f.line_start is not None]
-        comments = [
-            ReviewComment(
-                file_path=finding.file_path,
-                line=finding.line_start,  # type: ignore[arg-type]
-                line_end=finding.line_end,
-                body=format_finding_comment(finding),
-            )
-            for finding in inline_findings
-        ]
+        comments = _build_review_comments(inline_findings)
+
+        if self._pr_fetcher is not None and comments:
+            try:
+                diff = await self._pr_fetcher.fetch_diff_for_pr(
+                    installation_id=installation.installation_id,
+                    owner=repository.owner,
+                    repo=repository.name,
+                    pr_number=review.pr_number,
+                )
+                diff_lines = build_diff_line_index(diff.file_patches)
+                comments, dropped = _filter_comments_to_diff(comments, diff_lines)
+                if dropped:
+                    await logger.awarning(
+                        "github_inline_comments_dropped_not_in_diff",
+                        review_id=str(review.id),
+                        dropped=dropped,
+                        kept=len(comments),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                await logger.awarning(
+                    "github_diff_lookup_failed",
+                    review_id=str(review.id),
+                    error=str(exc)[:300],
+                )
 
         summary_body = build_summary_body(review.summary, postable)
 
@@ -79,12 +99,14 @@ class PostReviewToGithubUseCase:
         )
 
         if inline_findings and result.comment_ids:
+            posted_findings = inline_findings[: len(result.comment_ids)]
             updates = list(zip(
-                (f.id for f in inline_findings),
+                (f.id for f in posted_findings),
                 result.comment_ids,
                 strict=False,
             ))
-            await self._review_repo.update_finding_comment_ids(updates)
+            if updates:
+                await self._review_repo.update_finding_comment_ids(updates)
 
         updated = await self._review_repo.mark_posted_to_github(review.id)
         await logger.ainfo(
@@ -94,6 +116,44 @@ class PostReviewToGithubUseCase:
             inline_comments=len(comments),
         )
         return updated
+
+
+def _build_review_comments(findings: list[Finding]) -> list[ReviewComment]:
+    comments: list[ReviewComment] = []
+    for finding in findings:
+        if finding.line_start is None or finding.line_start < 1:
+            continue
+        body = format_finding_comment(finding).strip()
+        if not body or not finding.file_path.strip():
+            continue
+        comments.append(
+            ReviewComment(
+                file_path=finding.file_path,
+                line=finding.line_start,
+                line_end=finding.line_end,
+                body=body,
+            )
+        )
+    return comments
+
+
+def _filter_comments_to_diff(
+    comments: list[ReviewComment],
+    diff_lines: dict[str, set[int]],
+) -> tuple[list[ReviewComment], int]:
+    kept: list[ReviewComment] = []
+    dropped = 0
+    for comment in comments:
+        if is_comment_on_diff(
+            file_path=comment.file_path,
+            line=comment.line,
+            line_end=comment.line_end,
+            diff_lines=diff_lines,
+        ):
+            kept.append(comment)
+        else:
+            dropped += 1
+    return kept, dropped
 
 
 def format_finding_comment(finding: Finding) -> str:

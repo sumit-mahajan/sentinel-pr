@@ -10,7 +10,6 @@ from application.use_cases.post_review_to_github import PostReviewToGithubUseCas
 from application.use_cases.run_review_pipeline import MAX_ATTEMPTS, RunReviewPipelineUseCase
 from domain.entities.job import ReviewJob
 from domain.entities.review import Review
-from domain.errors import ApplicationError
 from domain.services.i_agent_orchestrator import OrchestratorResult
 from domain.value_objects.job_status import JobStatus
 from tests.support.memory_repositories import InMemoryJobRepository
@@ -30,6 +29,7 @@ def _make_job(attempt_count: int = 0, status: JobStatus = JobStatus.PENDING) -> 
         head_sha="b" * 40,
         status=status,
         attempt_count=attempt_count,
+        retry_after=None,
         error_message=None,
         enqueued_at=now,
         started_at=None,
@@ -61,7 +61,7 @@ async def test_pipeline_completes_successfully() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pipeline_marks_failed_on_orchestrator_error() -> None:
+async def test_pipeline_schedules_retry_on_first_failure() -> None:
     job = _make_job()
     repo = InMemoryJobRepository()
     repo._jobs[(job.repository_id, job.head_sha)] = job
@@ -72,26 +72,48 @@ async def test_pipeline_marks_failed_on_orchestrator_error() -> None:
     use_case = RunReviewPipelineUseCase(repo, orchestrator)
     result = await use_case.execute(job.id)
 
-    assert result is False
+    assert result is True
     stored = await repo.get_by_id(job.id)
     assert stored is not None
-    assert stored.status == JobStatus.FAILED
+    assert stored.status == JobStatus.PENDING
+    assert stored.retry_after is not None
     assert stored.error_message is not None
     assert "Gemini unavailable" in stored.error_message
+    assert stored.attempt_count == 1
 
 
 @pytest.mark.asyncio
-async def test_pipeline_rejects_job_at_max_attempts() -> None:
-    job = _make_job(attempt_count=MAX_ATTEMPTS)
+async def test_pipeline_marks_failed_after_max_attempts() -> None:
+    job = _make_job(attempt_count=2)
+    repo = InMemoryJobRepository()
+    repo._jobs[(job.repository_id, job.head_sha)] = job
+
+    orchestrator = AsyncMock()
+    orchestrator.run.side_effect = RuntimeError("Gemini unavailable")
+
+    use_case = RunReviewPipelineUseCase(repo, orchestrator)
+    result = await use_case.execute(job.id)
+
+    assert result is True
+    stored = await repo.get_by_id(job.id)
+    assert stored is not None
+    assert stored.status == JobStatus.FAILED
+    assert stored.attempt_count == 3
+
+
+@pytest.mark.asyncio
+async def test_pipeline_acks_queue_when_job_at_max_attempts() -> None:
+    """Terminal jobs must return True so Redis messages are not poison pills."""
+    job = _make_job(attempt_count=MAX_ATTEMPTS, status=JobStatus.FAILED)
+    job.error_message = "Gemini unavailable"
     repo = InMemoryJobRepository()
     repo._jobs[(job.repository_id, job.head_sha)] = job
 
     orchestrator = AsyncMock()
     use_case = RunReviewPipelineUseCase(repo, orchestrator)
 
-    with pytest.raises(ApplicationError):
-        await use_case.execute(job.id)
-
+    result = await use_case.execute(job.id)
+    assert result is True
     orchestrator.run.assert_not_awaited()
 
 

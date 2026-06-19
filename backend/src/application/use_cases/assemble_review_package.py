@@ -17,14 +17,17 @@ agent runs — wired into LanggraphOrchestrator in F-03.
 from __future__ import annotations
 
 import re
+from pathlib import PurePosixPath
 from uuid import UUID
 
 import structlog
 
 from domain.repositories.i_installation_repository import IInstallationRepository
 from domain.repositories.i_repo_repository import IRepoRepository
+from domain.services.i_code_embedding_store import ICodeEmbeddingStore
 from domain.services.i_code_parser import ParsedNode
 from domain.services.i_pr_fetcher import FilePatch, IPrFetcher
+from domain.utils.diff_utils import extract_changed_lines as _extract_changed_lines
 from infrastructure.ai.graph.state import (
     ChangedFile,
     ContextUnit,
@@ -45,10 +48,12 @@ class AssembleReviewPackageUseCase:
         repo_repo: IRepoRepository,
         installation_repo: IInstallationRepository,
         pr_fetcher: IPrFetcher,
+        embedding_store: ICodeEmbeddingStore | None = None,
     ) -> None:
         self._repo_repo = repo_repo
         self._installation_repo = installation_repo
         self._pr_fetcher = pr_fetcher
+        self._embedding_store = embedding_store
 
     async def execute(
         self,
@@ -123,6 +128,8 @@ class AssembleReviewPackageUseCase:
 
         context_units: list[ContextUnit] = []
         raw_diff_chunks: list[RawDiffChunk] = []
+        embedded_paths: set[str] = set()
+        total_embeddings = 0
 
         for patch in patches_to_process:
             if not patch.patch:
@@ -190,31 +197,107 @@ class AssembleReviewPackageUseCase:
                         language=language,
                     ))
 
+            if self._embedding_store is not None and new_content:
+                stored = await self._index_file_embeddings(
+                    repository_id=repository_id,
+                    head_sha=head_sha,
+                    file_path=patch.path,
+                    content=new_content,
+                    language=language,
+                    embedded_paths=embedded_paths,
+                    installation_id=installation.installation_id,
+                    owner=repo.owner,
+                    repo_name=repo.name,
+                )
+                total_embeddings += stored
+
         await log.ainfo(
             "review_package_assembled",
             context_units=len(context_units),
             raw_diff_chunks=len(raw_diff_chunks),
+            embeddings_stored=total_embeddings,
         )
         return pr_metadata, context_units, raw_diff_chunks
 
+    async def _index_file_embeddings(
+        self,
+        *,
+        repository_id: UUID,
+        head_sha: str,
+        file_path: str,
+        content: str,
+        language: str,
+        embedded_paths: set[str],
+        installation_id: int,
+        owner: str,
+        repo_name: str,
+    ) -> int:
+        """Embed all function/class chunks for a file plus 1-hop local imports."""
+        if file_path in embedded_paths or not content.strip():
+            return 0
+        embedded_paths.add(file_path)
 
-def _extract_changed_lines(patch: str) -> set[int]:
-    """Return the set of new-file line numbers touched by the patch."""
-    changed: set[int] = set()
-    current_line = 0
-    for line in patch.splitlines():
-        hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
-        if hunk:
-            current_line = int(hunk.group(1)) - 1
-            continue
-        if line.startswith("-"):
-            continue
-        if line.startswith("\\"):
-            continue
-        current_line += 1
-        if line.startswith("+"):
-            changed.add(current_line)
-    return changed
+        parser = get_parser(file_path)
+        nodes = parser.parse(content) if parser is not None else []
+        if not nodes:
+            nodes = [
+                ParsedNode(
+                    node_type="module",
+                    node_name=PurePosixPath(file_path).name,
+                    start_line=1,
+                    end_line=content.count("\n") + 1,
+                    body=content[:12000],
+                )
+            ]
+
+        chunks = [
+            {
+                "content": node.body,
+                "node_type": node.node_type,
+                "node_name": node.node_name,
+                "chunk_index": index,
+            }
+            for index, node in enumerate(nodes)
+            if node.body.strip()
+        ]
+        if not chunks:
+            return 0
+        stored = await self._embedding_store.store_file_chunks(
+            repository_id=repository_id,
+            commit_sha=head_sha,
+            file_path=file_path,
+            chunks=chunks,
+            language=language,
+        )
+
+        for neighbor_path in _one_hop_import_paths(content, file_path):
+            if neighbor_path in embedded_paths:
+                continue
+            try:
+                neighbor_content = await self._pr_fetcher.fetch_file_content(
+                    installation_id=installation_id,
+                    owner=owner,
+                    repo=repo_name,
+                    path=neighbor_path,
+                    ref=head_sha,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if not neighbor_content.strip():
+                continue
+            neighbor_lang = lang_for_path(neighbor_path) or language
+            stored += await self._index_file_embeddings(
+                repository_id=repository_id,
+                head_sha=head_sha,
+                file_path=neighbor_path,
+                content=neighbor_content,
+                language=neighbor_lang,
+                embedded_paths=embedded_paths,
+                installation_id=installation_id,
+                owner=owner,
+                repo_name=repo_name,
+            )
+        return stored
 
 
 def _extract_node_patch(full_patch: str, node: ParsedNode) -> str:
@@ -227,7 +310,6 @@ def _extract_node_patch(full_patch: str, node: ParsedNode) -> str:
         hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
         if hunk:
             current_line = int(hunk.group(1)) - 1
-            # Include hunk header if it's relevant to the node
             if _hunk_overlaps(line, node):
                 relevant.append(line)
                 in_hunk = True
@@ -253,3 +335,47 @@ def _hunk_overlaps(hunk_header: str, node: ParsedNode) -> bool:
     count = int(m.group(2)) if m.group(2) else 1
     end = start + count
     return not (end < node.start_line or start > node.end_line + 10)
+
+
+def _one_hop_import_paths(source: str, current_path: str) -> list[str]:
+    """Resolve relative Python/JS imports to repo-relative paths (1-hop)."""
+    base_dir = str(PurePosixPath(current_path).parent)
+    if base_dir == ".":
+        base_dir = ""
+    candidates: list[str] = []
+
+    for line in source.splitlines():
+        rel = re.match(r"^\s*from\s+(\.+)([\w.]+)\s+import\s+", line)
+        if rel:
+            dots = rel.group(1)
+            module = rel.group(2).replace(".", "/")
+            parent = base_dir
+            for _ in range(len(dots) - 1):
+                parent = str(PurePosixPath(parent).parent) if parent else ""
+            prefix = f"{parent}/" if parent else ""
+            candidates.append(f"{prefix}{module}.py")
+            candidates.append(f"{prefix}{module}/__init__.py")
+            continue
+
+        direct = re.match(r"^\s*from\s+([\w.]+)\s+import\s+", line)
+        if direct:
+            module = direct.group(1).replace(".", "/")
+            candidates.append(f"{module}.py")
+            candidates.append(f"src/{module}.py")
+            continue
+
+        plain = re.match(r"^\s*import\s+([\w.]+)", line)
+        if plain:
+            module = plain.group(1).split(".")[0]
+            candidates.append(f"{module}.py")
+            candidates.append(f"src/{module}.py")
+
+    # De-dupe while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for path in candidates:
+        normalized = path.lstrip("/")
+        if normalized not in seen:
+            seen.add(normalized)
+            unique.append(normalized)
+    return unique

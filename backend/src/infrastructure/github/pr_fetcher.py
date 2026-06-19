@@ -107,3 +107,37 @@ class GitHubPrFetcher(IPrFetcher):
             return base64.b64decode(data["content"].replace("\n", "")).decode("utf-8", errors="replace")
 
         return str(data.get("content", ""))
+
+    async def fetch_diff_for_pr(
+        self,
+        installation_id: int,
+        owner: str,
+        repo: str,
+        pr_number: int,
+    ) -> PullRequestDiff:
+        headers = await self._headers(installation_id)
+        url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}"
+        response = await self._http.get(url, headers=headers)
+        if response.status_code >= 400:
+            raise ExternalServiceError(
+                f"GitHub pull request fetch failed: {response.status_code} for {owner}/{repo}#{pr_number}"
+            )
+
+        data = response.json()
+        base_sha = str(data["base"]["sha"])
+        head_sha = str(data["head"]["sha"])
+        diff = await self.fetch_diff(
+            installation_id=installation_id,
+            owner=owner,
+            repo=repo,
+            base_sha=base_sha,
+            head_sha=head_sha,
+        )
+        return PullRequestDiff(
+            pr_number=pr_number,
+            base_sha=diff.base_sha,
+            head_sha=diff.head_sha,
+            base_branch=str(data["base"].get("ref", diff.base_branch)),
+            head_branch=str(data["head"].get("ref", diff.head_branch)),
+            file_patches=diff.file_patches,
+        )

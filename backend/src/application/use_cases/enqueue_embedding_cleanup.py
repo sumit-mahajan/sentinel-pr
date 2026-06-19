@@ -1,19 +1,25 @@
 import structlog
 
 from domain.errors import EntityNotFoundError
+from domain.repositories.i_embedding_cleanup_job_repository import (
+    CreateEmbeddingCleanupJobParams,
+    IEmbeddingCleanupJobRepository,
+)
 from domain.repositories.i_repo_repository import IRepoRepository
-from domain.services.i_queue_client import IQueueClient, QueueMessage
-from domain.value_objects.job_type import JobType
 
 logger = structlog.get_logger()
 
 
 class EnqueueEmbeddingCleanupUseCase:
-    """Enqueue embedding cleanup when a pull request is closed."""
+    """Persist embedding cleanup job when a pull request is closed."""
 
-    def __init__(self, repo_repo: IRepoRepository, queue: IQueueClient) -> None:
+    def __init__(
+        self,
+        repo_repo: IRepoRepository,
+        cleanup_job_repo: IEmbeddingCleanupJobRepository,
+    ) -> None:
         self._repo_repo = repo_repo
-        self._queue = queue
+        self._cleanup_job_repo = cleanup_job_repo
 
     async def execute(
         self,
@@ -28,10 +34,19 @@ class EnqueueEmbeddingCleanupUseCase:
                 f"Repository github_id={repository_github_id} is not registered"
             )
 
-        await self._queue.enqueue(
-            QueueMessage(
-                job_type=JobType.EMBEDDING_CLEANUP,
-                job_id=None,
+        existing = await self._cleanup_job_repo.get_by_repo_and_head_sha(repo.id, head_sha)
+        if existing is not None:
+            log = logger.bind(
+                repo=repo.full_name,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                job_id=str(existing.id),
+            )
+            await log.ainfo("embedding_cleanup_idempotent_skip", status=existing.status.value)
+            return False
+
+        await self._cleanup_job_repo.create(
+            CreateEmbeddingCleanupJobParams(
                 repository_id=repo.id,
                 head_sha=head_sha,
                 pr_number=pr_number,

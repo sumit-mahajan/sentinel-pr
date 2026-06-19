@@ -23,6 +23,7 @@ from infrastructure.ai.agents.test_agent import TestAgent
 from infrastructure.ai.graph.state import ReviewState
 
 AgentRunner = Callable[[ReviewState], Awaitable[ReviewState]]
+RagRetriever = Callable[[ReviewState, AgentType], Awaitable[list[str]]]
 
 
 def _make_specialists_runner(
@@ -30,6 +31,7 @@ def _make_specialists_runner(
     perf: PerfAgent,
     arch: ArchAgent,
     test: TestAgent,
+    rag_retriever: RagRetriever | None = None,
 ) -> AgentRunner:
     runners: dict[AgentType, AgentRunner] = {
         AgentType.SECURITY: security.run,
@@ -39,7 +41,11 @@ def _make_specialists_runner(
     }
 
     async def run_specialists(state: ReviewState) -> ReviewState:
+        rag_chunks = dict(state.get("rag_chunks") or {})
         for agent_type in state.get("active_agents", list(AgentType)):
+            if rag_retriever is not None:
+                rag_chunks[agent_type.value] = await rag_retriever(state, agent_type)
+            state = {**state, "rag_chunks": rag_chunks}
             runner = runners.get(agent_type)
             if runner is not None:
                 state = await runner(state)
@@ -55,13 +61,14 @@ def build_review_graph(
     arch: ArchAgent,
     test: TestAgent,
     synthesis: SynthesisAgent,
+    rag_retriever: RagRetriever | None = None,
 ) -> StateGraph:
     graph = StateGraph(ReviewState)
 
     graph.add_node("supervisor", supervisor.run)
     graph.add_node(
         "specialists",
-        _make_specialists_runner(security, perf, arch, test),
+        _make_specialists_runner(security, perf, arch, test, rag_retriever),
     )
     graph.add_node("synthesis", synthesis.run)
 

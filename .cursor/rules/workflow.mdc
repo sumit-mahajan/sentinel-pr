@@ -200,11 +200,46 @@ For each feature:
 - Unit tests pass
 - Integration test for the happy path passes
 - Reviewer checklist passes with no unchecked items
-- `session-state.mdc` updated
+- **`session-state.mdc` updated** (see Feature Completion Gate below)
 
 **Batching rule:** Once 2-3 features are complete and patterns are
 stable, related features in the same domain/layer may be batched.
 Never batch across architectural boundaries.
+
+---
+
+## Feature Completion Gate (mandatory)
+
+Before marking **any** feature `DONE` in `session-state.mdc` or moving to the next
+feature ID, complete **all** of the following:
+
+1. **Acceptance criteria audit** — Open `features.mdc` for that feature ID. Every
+   bullet in acceptance criteria must be verified (automated test, SQL/Redis check, or
+   documented manual step). Record pass/fail in session-state under the feature row.
+
+2. **No partial features** — DB tables, interfaces, or `# F-XX` comments alone do **not**
+   count as done. If only part of a feature is implemented (e.g. tree-sitter without
+   pgvector writes), mark it `PARTIAL` or `DEFERRED` in session-state — never `DONE`.
+
+3. **Explicit deferral when skipping order** — The planned build order in session-state
+   is the default. Skipping a feature (e.g. building F-04 before F-03) requires an
+   explicit `DEFERRED: F-XX — <reason>` line in session-state **before** starting the
+   substitute feature. P0 does not automatically override P1 without recording why.
+
+4. **Integration proof for data features** — Features that persist or queue data must
+   have an observable artifact before `DONE`:
+   - Embeddings → `SELECT COUNT(*) FROM code_embeddings` > 0 after a test PR
+   - Reviews → row in `reviews` + optional GitHub post
+   - Queue → message XACK'd; `XPENDING` not growing unbounded
+   - "Code exists" or "table migrated" is insufficient.
+
+5. **session-state hygiene** — On every feature boundary update: `Last Completed Step`,
+   `Current In-Progress`, and `Next Immediate Action`. Stale "Next action" from earlier
+   steps (e.g. Step 4 setup) must be removed or updated — never left contradictory.
+
+6. **Cross-feature comment scan** — Before marking feature N done, grep the diff for
+   `# F-<other>` references. Any comment pointing at unfinished work in another feature
+   ID is a blocker unless that other feature is marked `PARTIAL` with listed gaps.
 
 ---
 

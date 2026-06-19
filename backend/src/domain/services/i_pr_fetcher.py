@@ -46,3 +46,13 @@ class IPrFetcher(ABC):
         ref: str,
     ) -> str:
         """Fetch the raw content of a file at a given git ref."""
+
+    @abstractmethod
+    async def fetch_diff_for_pr(
+        self,
+        installation_id: int,
+        owner: str,
+        repo: str,
+        pr_number: int,
+    ) -> PullRequestDiff:
+        """Fetch the current base→head diff for an open pull request."""

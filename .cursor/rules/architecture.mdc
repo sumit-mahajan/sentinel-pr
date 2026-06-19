@@ -180,6 +180,9 @@ If a job crashes mid-flight, Redis can deliver the message again. Guards in:
 
 So at-least-once queue delivery does not cause duplicate GitHub comments.
 
+**Terminal failure ack:** Jobs with `attempt_count >= MAX_ATTEMPTS` return `True` from
+`RunReviewPipelineUseCase` so the Redis message is XACK'd and does not block the PEL.
+
 #### 4. Redis queue: ack only on success ✅
 
 Worker uses Redis Streams + consumer group (`XREADGROUP` / `XACK` in `worker/drain.py`).

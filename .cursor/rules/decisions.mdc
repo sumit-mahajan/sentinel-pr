@@ -29,6 +29,27 @@ PR volume, paid models become expensive immediately.
 
 ---
 
+## D-01b · Gemini SDK — google-genai over google-generativeai
+
+**Decision:** Use the `google-genai` package (Google Gen AI SDK) for all direct Gemini API
+calls in `gemini_client.py`.
+
+**Context:** `google-generativeai` is deprecated (no further updates). The replacement SDK
+exposes native async via `client.aio` and `response_json_schema` for structured output.
+Embeddings use `gemini-embedding-001` with `output_dimensionality=768` (replaces deprecated
+`text-embedding-004`; same pgvector column size).
+
+**Alternatives considered:**
+
+- Keep `google-generativeai` until forced migration — emits FutureWarning on every call
+- Route all calls through `langchain-google-genai` — adds indirection; agents use structured
+  output on our wrapper, not LangChain
+
+**Rejected because:** Deprecation warning on every worker review; `google-genai` is the
+supported path and fits our thin-wrapper pattern.
+
+---
+
 ## D-02 · Vector Store — pgvector (Neon) over Chroma / Pinecone
 
 **Decision:** Use the pgvector extension on the existing Neon Postgres instance for

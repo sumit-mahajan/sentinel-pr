@@ -1,7 +1,7 @@
 """
 EmbeddingService — wraps GeminiClient.embed for code chunk embedding.
 
-Returns 768-dimensional vectors via Gemini text-embedding-004.
+Returns 768-dimensional vectors via gemini-embedding-001 (Matryoshka-truncated).
 """
 from __future__ import annotations
 
@@ -19,9 +19,14 @@ class EmbeddingService:
         self._gemini = gemini
 
     async def embed_text(self, text: str) -> list[float]:
-        """Embed a single text chunk. Truncates if too long."""
+        """Embed document text for storage. Truncates if too long."""
         truncated = text[:MAX_CHARS_PER_CHUNK]
-        return await self._gemini.embed(truncated)
+        return await self._gemini.embed(truncated, task_type="RETRIEVAL_DOCUMENT")
+
+    async def embed_query(self, text: str) -> list[float]:
+        """Embed a search query for similarity retrieval."""
+        truncated = text[:MAX_CHARS_PER_CHUNK]
+        return await self._gemini.embed(truncated, task_type="RETRIEVAL_QUERY")
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Embed multiple texts sequentially. Returns parallel list of vectors."""

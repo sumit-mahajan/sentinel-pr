@@ -7,7 +7,7 @@ import pytest
 from application.use_cases.enqueue_embedding_cleanup import EnqueueEmbeddingCleanupUseCase
 from domain.entities.repository import Repository
 from domain.errors import EntityNotFoundError
-from domain.value_objects.job_type import JobType
+from tests.support.memory_repositories import InMemoryEmbeddingCleanupJobRepository
 
 
 def _repo() -> Repository:
@@ -32,9 +32,9 @@ async def test_enqueue_embedding_cleanup_success() -> None:
     repo = _repo()
     repo_repo = AsyncMock()
     repo_repo.get_by_github_id.return_value = repo
-    queue = AsyncMock()
+    cleanup_job_repo = InMemoryEmbeddingCleanupJobRepository()
 
-    use_case = EnqueueEmbeddingCleanupUseCase(repo_repo, queue)
+    use_case = EnqueueEmbeddingCleanupUseCase(repo_repo, cleanup_job_repo)
     result = await use_case.execute(
         repository_github_id=repo.github_id,
         head_sha="c" * 40,
@@ -42,19 +42,18 @@ async def test_enqueue_embedding_cleanup_success() -> None:
     )
 
     assert result is True
-    queue.enqueue.assert_awaited_once()
-    message = queue.enqueue.await_args.args[0]
-    assert message.job_type == JobType.EMBEDDING_CLEANUP
-    assert message.head_sha == "c" * 40
+    stored = await cleanup_job_repo.get_by_repo_and_head_sha(repo.id, "c" * 40)
+    assert stored is not None
+    assert stored.pr_number == 42
 
 
 @pytest.mark.asyncio
 async def test_enqueue_embedding_cleanup_unknown_repo() -> None:
     repo_repo = AsyncMock()
     repo_repo.get_by_github_id.return_value = None
-    queue = AsyncMock()
+    cleanup_job_repo = InMemoryEmbeddingCleanupJobRepository()
 
-    use_case = EnqueueEmbeddingCleanupUseCase(repo_repo, queue)
+    use_case = EnqueueEmbeddingCleanupUseCase(repo_repo, cleanup_job_repo)
 
     with pytest.raises(EntityNotFoundError):
         await use_case.execute(

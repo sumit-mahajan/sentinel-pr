@@ -21,13 +21,13 @@ alwaysApply: true
 | Step 3 — Lock data contracts | DONE | `schema.mdc` (DB schema + DTOs + API contract) |
 | Step 4 — Workspace setup | DONE | `reviewer.mdc`, `backend-standards.mdc`, `frontend-standards.mdc`, `.cursor/hooks.json`, `.pre-commit-config.yaml` |
 | Step 4.5 — Lock deployment config | DONE | `Dockerfile`, `docker-compose.yml`, `.env.example`, `render.yaml`, `vercel.json`, `Makefile`, `.gitignore`, `pyproject.toml`, `package.json`, full dir skeleton |
-| Step 5 — Incremental feature build | IN PROGRESS | F-01 ✓, F-05 ✓, F-07 ✓, F-02 ✓ |
+| Step 5 — Incremental feature build | IN PROGRESS | F-01 ✓, F-05 ✓, F-07 ✓, F-02 ✓, F-04 ✓ |
 
 ---
 
 ## Last Completed Step
 
-F-04 — Structured Review Output committed (`691dd72`). F-06 built, awaiting review.
+F-03 — Code Context & RAG (embed on assembly, per-agent pgvector retrieval, real cleanup repo, queue poison-pill fix). Built uncommitted.
 
 ---
 
@@ -37,12 +37,31 @@ F-06 Web Dashboard — backend dashboard API + React SPA complete. Awaiting user
 
 ---
 
-## Progress
+## Feature Build Status
 
-| Step | Status | File(s) |
-|---|-----|---|
-| F-04 Structured Review Output | DONE (committed) | persist_review, post_review_to_github, comment_poster |
-| F-06 Web Dashboard | BUILT (uncommitted) | auth/repos/reviews API routes, React dashboard |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| F-01 GitHub Webhook | DONE (committed) | |
+| F-05 Async Worker | DONE (committed) | Poison-pill fix: terminal jobs return ack=True |
+| F-07 Observability + DB | DONE (committed) | |
+| F-02 Multi-Agent Pipeline | DONE (committed) | |
+| F-04 Structured Review Output | DONE (committed) | Was built before F-03 (out of order; see retrospective) |
+| F-03 Code Context & RAG | BUILT (uncommitted) | embed→pgvector, RAG per agent, Postgres cleanup repo |
+| F-06 Web Dashboard | BUILT (uncommitted) | Awaiting user review |
+| F-08 Evaluation System | NOT STARTED | P2 |
+
+---
+
+## F-03 Acceptance Criteria (verified this session)
+
+| Criterion | Status |
+|-----------|--------|
+| tree-sitter chunking at function/class boundaries | PASS (existing + tests) |
+| Embed changed files into pgvector keyed by commit SHA | PASS (`AssembleReviewPackageUseCase` + `PgvectorStore.store_file_chunks`) |
+| Per-agent RAG top-5 retrieval | PASS (`review_graph` rag_retriever + `retrieve_similar`) |
+| Embedding cleanup on PR close | PASS (`PostgresEmbeddingCleanupRepository` in worker) |
+| 1-hop import graph | PARTIAL — relative/local Python imports; not full module resolution |
+| Integration proof SQL | Manual: `SELECT COUNT(*) FROM code_embeddings` after next PR review |
 
 ---
 
@@ -80,10 +99,18 @@ None.
 
 ## Next Immediate Action
 
-**Step 4 — Workspace Setup:**
-1. Add `reviewer.mdc` with pre-commit review checklist
-2. Add `reviewer-agent` hook using the review-bugbot or security-review skill
-3. Confirm tooling: ruff (linter), mypy (types), pytest (tests), ESLint + tsc (frontend)
+1. User review F-03 + F-06 changes (uncommitted)
+2. Run next PR review → confirm `code_embeddings` rows in Neon SQL Editor
+3. Re-wake worker to drain remaining Redis PEL entries (3 pending as of last check)
+
+---
+
+## Retrospective: Why F-03 Was Missed Initially
+
+F-04 (P0) was built before F-03 (P1) without an explicit `DEFERRED` line in session-state.
+Partial F-03 work (tree-sitter assembly) was merged into the F-02 path with `# F-03` comments,
+which looked complete. Infrastructure (`code_embeddings` table, `PgvectorStore`) existed but
+was never wired. **Fixed:** workflow.mdc now has a Feature Completion Gate to prevent recurrence.
 
 ---
 

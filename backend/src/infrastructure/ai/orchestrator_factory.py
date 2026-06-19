@@ -16,6 +16,8 @@ from infrastructure.db.repositories.repo_repository import PostgresRepoRepositor
 from infrastructure.github.app_client import GithubAppClient
 from infrastructure.github.pr_fetcher import GitHubPrFetcher
 from infrastructure.observability.langfuse_client import build_langfuse_client
+from infrastructure.vector.embedding_service import EmbeddingService
+from infrastructure.vector.pgvector_store import PgvectorStore
 
 logger = structlog.get_logger()
 
@@ -38,6 +40,7 @@ def build_orchestrator(
         settings.langfuse_secret_key,
         host=settings.langfuse_host,
     )
+    embedding_store = PgvectorStore(db, EmbeddingService(gemini))
 
     assembler: AssembleReviewPackageUseCase | None = None
     if settings.github_app_id and (
@@ -53,6 +56,7 @@ def build_orchestrator(
             PostgresRepoRepository(db),
             PostgresInstallationRepository(db),
             pr_fetcher,
+            embedding_store=embedding_store,
         )
     else:
         logger.warning(
@@ -65,5 +69,7 @@ def build_orchestrator(
         gemini,
         job_repo,
         assembler=assembler,
+        embedding_store=embedding_store,
         langfuse=langfuse,
+        db=db,
     )

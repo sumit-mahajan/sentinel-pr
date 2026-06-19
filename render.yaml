@@ -1,6 +1,6 @@
 services:
   # ── API + worker (single free-tier container) ─────────────────────────────
-  # Worker listens on 8001 internally; API wakes it via localhost after enqueue.
+  # Worker polls Postgres every ~5s in a background process (start.sh).
   - type: web
     name: pr-reviewer-api
     plan: free
@@ -18,10 +18,6 @@ services:
       - key: UPSTASH_REDIS_URL
         sync: false
       - key: UPSTASH_REDIS_TOKEN
-        sync: false
-      - key: WORKER_WAKE_URL
-        value: http://127.0.0.1:8001/wake
-      - key: WORKER_WAKE_SECRET
         sync: false
       - key: GEMINI_API_KEY
         sync: false
@@ -52,5 +48,5 @@ services:
 
 # NOTE: Free-tier behaviour
 #   - Single service spins down after 15 min inactivity (~30–60s cold start)
-#   - Webhook returns 202 immediately; job is safe in Redis until drain runs
-#   - Worker runs in-process on port 8001 — no second Render service needed
+#   - Webhook returns 202 immediately; job row is safe in Postgres until worker polls
+#   - Worker runs as a background process in the same container (no HTTP endpoint)

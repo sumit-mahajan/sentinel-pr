@@ -8,10 +8,12 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from application.use_cases.assemble_review_package import AssembleReviewPackageUseCase
 from domain.repositories.i_job_repository import IJobRepository
 from domain.services.i_agent_orchestrator import IAgentOrchestrator, OrchestratorResult
+from domain.services.i_code_embedding_store import ICodeEmbeddingStore
 from domain.value_objects.agent_type import AgentType
 from domain.value_objects.review_finding import ReviewFinding
 from infrastructure.ai.agents.arch_agent import ArchAgent
@@ -21,7 +23,7 @@ from infrastructure.ai.agents.supervisor_agent import SupervisorAgent
 from infrastructure.ai.agents.synthesis_agent import SynthesisAgent
 from infrastructure.ai.agents.test_agent import TestAgent
 from infrastructure.ai.gemini_client import GeminiClient
-from infrastructure.ai.graph.review_graph import build_review_graph
+from infrastructure.ai.graph.review_graph import RagRetriever, build_review_graph
 from infrastructure.ai.graph.state import ReviewState
 from infrastructure.observability.langfuse_client import ILangfuseClient, NoOpLangfuseClient
 
@@ -42,12 +44,16 @@ class LanggraphOrchestrator(IAgentOrchestrator):
         gemini: GeminiClient,
         job_repo: IJobRepository,
         assembler: AssembleReviewPackageUseCase | None = None,
+        embedding_store: ICodeEmbeddingStore | None = None,
         langfuse: ILangfuseClient | None = None,
+        db: AsyncSession | None = None,
     ) -> None:
         self._gemini = gemini
         self._job_repo = job_repo
         self._assembler = assembler
+        self._embedding_store = embedding_store
         self._langfuse = langfuse or NoOpLangfuseClient()
+        self._db = db
 
         supervisor = SupervisorAgent(gemini)
         security = SecurityAgent(gemini)
@@ -56,9 +62,27 @@ class LanggraphOrchestrator(IAgentOrchestrator):
         test = TestAgent(gemini)
         synthesis = SynthesisAgent(gemini)
 
+        rag_retriever = self._build_rag_retriever()
         self._graph = build_review_graph(
-            supervisor, security, perf, arch, test, synthesis
+            supervisor, security, perf, arch, test, synthesis, rag_retriever
         ).compile()
+
+    def _build_rag_retriever(self) -> RagRetriever | None:
+        if self._embedding_store is None:
+            return None
+
+        store = self._embedding_store
+
+        async def retrieve(state: ReviewState, agent_type: AgentType) -> list[str]:
+            query = _RAG_QUERIES.get(agent_type.value, agent_type.value)
+            return await store.retrieve_similar(
+                repository_id=state["repository_id"],
+                commit_sha=state["pr_metadata"].head_sha,
+                query_text=query,
+                k=5,
+            )
+
+        return retrieve
 
     async def run(self, job_id: UUID) -> OrchestratorResult:
         job = await self._job_repo.get_by_id(job_id)
@@ -89,6 +113,8 @@ class LanggraphOrchestrator(IAgentOrchestrator):
                 )
             except Exception as exc:  # noqa: BLE001
                 await log.awarning("review_package_assembly_failed", error=str(exc))
+                if self._db is not None:
+                    await self._db.rollback()
                 # Degrade gracefully — proceed with empty context units
 
         from infrastructure.ai.graph.state import PRMetadata  # noqa: PLC0415

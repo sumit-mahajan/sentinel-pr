@@ -26,6 +26,7 @@ def _make_job() -> ReviewJob:
         head_sha="b" * 40,
         status=JobStatus.RUNNING,
         attempt_count=1,
+        retry_after=None,
         error_message=None,
         enqueued_at=now,
         started_at=now,

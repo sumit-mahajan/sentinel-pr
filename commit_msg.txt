@@ -1,5 +1,0 @@
-chore: standardize frontend UI with landing page, dark mode, and branding
-
-Align the dashboard with the locked UI style: public landing at /, app routes
-under /dashboard, theme toggle with flash prevention, responsive nav, skeleton
-loaders, repo settings page, and ReviewGraph branding assets.

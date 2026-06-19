@@ -4,6 +4,7 @@ GithubCommentPoster — posts PR reviews and inline comments via the GitHub REST
 from __future__ import annotations
 
 import httpx
+import structlog
 
 from domain.errors import ExternalServiceError
 from domain.services.i_github_comment_poster import (
@@ -13,6 +14,7 @@ from domain.services.i_github_comment_poster import (
 )
 from infrastructure.github.app_client import GithubAppClient
 
+logger = structlog.get_logger()
 GITHUB_API = "https://api.github.com"
 
 
@@ -56,15 +58,26 @@ class GithubCommentPoster(IGithubCommentPoster):
 
         url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
         response = await self._http.post(url, headers=headers, json=payload)
+        if response.status_code >= 400 and comments:
+            await logger.awarning(
+                "github_review_inline_comments_rejected",
+                status_code=response.status_code,
+                pr_number=pr_number,
+                inline_comments=len(comments),
+                error=response.text[:500],
+            )
+            payload.pop("comments", None)
+            response = await self._http.post(url, headers=headers, json=payload)
+
         if response.status_code >= 400:
             raise ExternalServiceError(
-                f"GitHub PR review post failed: {response.status_code} for {owner}/{repo}#{pr_number}"
+                "GitHub PR review post failed: "
+                f"{response.status_code} for {owner}/{repo}#{pr_number} — {response.text[:300]}"
             )
 
         data = response.json()
         review_id = int(data["id"])
 
-        # GitHub returns inline comment IDs on the review object when present.
         comment_ids: list[int] = []
         for item in data.get("comments", []) or []:
             if isinstance(item, dict) and "id" in item:

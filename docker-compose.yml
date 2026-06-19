@@ -1,16 +1,15 @@
 # Local dev mirrors production topology:
 #   Docker  → api + worker (same backend/Dockerfile as Render)
-#   Managed → Neon Postgres (pgvector) + Upstash Redis (from .env)
+#   Managed → Neon Postgres (pgvector) + Upstash Redis (optional, from .env)
 #
-# Wake-on-enqueue: API POSTs to worker /wake after each Redis enqueue (no idle polling).
+# Worker polls Postgres for pending jobs — no HTTP wake endpoint.
 #
-# Prerequisites: copy .env.example → .env and set DATABASE_URL, UPSTASH_*,
-# WORKER_WAKE_SECRET, GEMINI_API_KEY, GitHub App credentials, etc.
+# Prerequisites: copy .env.example → .env and set DATABASE_URL, GEMINI_API_KEY,
+# GitHub App credentials, etc.
 #
 # Run: make dev   (or: docker compose up --build)
 
 services:
-  # ── FastAPI API server ────────────────────────────────────────────────────
   api:
     build:
       context: ./backend
@@ -21,7 +20,6 @@ services:
       - .env
     environment:
       - ENVIRONMENT=development
-      - WORKER_WAKE_URL=http://worker:8001/wake
     depends_on:
       - worker
     volumes:
@@ -29,13 +27,10 @@ services:
       - ./backend/worker:/app/worker
     command: uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 
-  # ── Worker (HTTP /wake + event-driven queue drain) ───────────────────────
   worker:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    ports:
-      - "8001:8001"
     env_file:
       - .env
     environment:
@@ -43,4 +38,4 @@ services:
     volumes:
       - ./backend/src:/app/src
       - ./backend/worker:/app/worker
-    command: uv run uvicorn worker.http:app --host 0.0.0.0 --port 8001 --reload
+    command: uv run python -m worker.main

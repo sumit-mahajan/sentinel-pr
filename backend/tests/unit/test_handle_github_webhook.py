@@ -45,6 +45,7 @@ def _job(repo: Repository) -> ReviewJob:
         head_sha="b" * 40,
         status=JobStatus.PENDING,
         attempt_count=0,
+        retry_after=None,
         error_message=None,
         enqueued_at=now,
         started_at=None,

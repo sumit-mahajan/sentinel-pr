@@ -14,6 +14,7 @@ from domain.entities.github_installation import GithubInstallation
 from domain.entities.repository import Repository
 from domain.entities.review import Finding, Review
 from domain.services.i_github_comment_poster import PostedReviewResult
+from domain.services.i_pr_fetcher import FilePatch, PullRequestDiff
 from domain.value_objects.agent_type import AgentType
 from domain.value_objects.severity import Severity
 from tests.support.memory_repositories import InMemoryInstallationRepository, InMemoryRepoRepository
@@ -172,6 +173,69 @@ async def test_post_review_filters_below_min_severity() -> None:
 
     use_case = PostReviewToGithubUseCase(
         review_repo, repo_repo, inst_repo, poster, min_severity=Severity.MEDIUM
+    )
+    await use_case.execute(review)
+
+    call_kwargs = poster.post_pull_request_review.await_args.kwargs
+    assert call_kwargs["comments"] == []
+
+
+@pytest.mark.asyncio
+async def test_post_review_drops_inline_comments_not_on_diff() -> None:
+    review, repository, installation = _make_review()
+    review.findings[0] = Finding(
+        id=review.findings[0].id,
+        review_id=review.id,
+        severity=Severity.HIGH,
+        category="security",
+        agent_source="security",
+        file_path="src/auth.py",
+        line_start=99,
+        line_end=None,
+        title="Off-diff line",
+        description="Not on changed lines.",
+        fix_suggestion=None,
+        github_comment_id=None,
+        created_at=review.findings[0].created_at,
+    )
+    review_repo = InMemoryReviewRepository()
+    review_repo._reviews[review.id] = review
+    repo_repo = InMemoryRepoRepository()
+    repo_repo._repos[repository.github_id] = repository
+    inst_repo = InMemoryInstallationRepository()
+    inst_repo._installations[installation.installation_id] = installation
+
+    pr_fetcher = AsyncMock()
+    pr_fetcher.fetch_diff_for_pr.return_value = PullRequestDiff(
+        pr_number=3,
+        base_sha="b" * 40,
+        head_sha=review.head_sha,
+        base_branch="main",
+        head_branch="feature",
+        file_patches=[
+            FilePatch(
+                path="src/auth.py",
+                status="modified",
+                patch="@@ -40,3 +40,4 @@\n unchanged\n+added\n",
+                additions=1,
+                deletions=0,
+            )
+        ],
+    )
+
+    poster = AsyncMock()
+    poster.post_pull_request_review.return_value = PostedReviewResult(
+        github_review_id=999,
+        comment_ids=(),
+    )
+
+    use_case = PostReviewToGithubUseCase(
+        review_repo,
+        repo_repo,
+        inst_repo,
+        poster,
+        pr_fetcher=pr_fetcher,
+        min_severity=Severity.MEDIUM,
     )
     await use_case.execute(review)
 

@@ -1,3 +1,4 @@
+"""Integration tests for POST /api/v1/webhooks/github."""
 import hashlib
 import hmac
 from collections.abc import AsyncIterator
@@ -9,7 +10,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from api.dependencies.container import AppContainer, build_container
+from api.dependencies.container import build_container
 from api.main import create_app
 from application.use_cases.enqueue_embedding_cleanup import EnqueueEmbeddingCleanupUseCase
 from application.use_cases.handle_github_webhook import HandleGithubWebhookUseCase
@@ -17,8 +18,11 @@ from application.use_cases.start_review import StartReviewUseCase
 from application.use_cases.sync_installation import SyncInstallationUseCase
 from domain.repositories.i_repo_repository import UpsertRepositoryParams
 from infrastructure.github.webhook_signature import GithubWebhookSignatureValidator
-from infrastructure.queue.in_memory_queue_client import InMemoryQueueClient
-from tests.support.memory_repositories import InMemoryJobRepository, InMemoryRepoRepository
+from tests.support.memory_repositories import (
+    InMemoryEmbeddingCleanupJobRepository,
+    InMemoryJobRepository,
+    InMemoryRepoRepository,
+)
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 WEBHOOK_SECRET = "integration-test-secret"
@@ -34,10 +38,12 @@ class _TestContainer:
         self,
         use_case: HandleGithubWebhookUseCase,
         signature_validator: GithubWebhookSignatureValidator,
+        job_repo: InMemoryJobRepository,
     ) -> None:
         self._use_case = use_case
         self.signature_validator = signature_validator
         self.session_factory = _fake_session_factory
+        self._job_repo = job_repo
 
     def webhook_use_case(self, _session: object) -> HandleGithubWebhookUseCase:
         return self._use_case
@@ -49,34 +55,35 @@ async def _fake_session_factory() -> AsyncIterator[object]:
 
 
 @pytest.fixture
-def webhook_setup() -> tuple[TestClient, InMemoryQueueClient, InMemoryRepoRepository]:
+def webhook_setup() -> tuple[TestClient, InMemoryJobRepository, InMemoryRepoRepository]:
     build_container.cache_clear()
 
-    queue = InMemoryQueueClient()
     job_repo = InMemoryJobRepository()
     repo_repo = InMemoryRepoRepository()
+    cleanup_job_repo = InMemoryEmbeddingCleanupJobRepository()
 
-    start_review = StartReviewUseCase(job_repo, repo_repo, queue)
-    enqueue_cleanup = EnqueueEmbeddingCleanupUseCase(repo_repo, queue)
+    start_review = StartReviewUseCase(job_repo, repo_repo)
+    enqueue_cleanup = EnqueueEmbeddingCleanupUseCase(repo_repo, cleanup_job_repo)
     sync_installation = AsyncMock(spec=SyncInstallationUseCase)
 
     use_case = HandleGithubWebhookUseCase(start_review, enqueue_cleanup, sync_installation)
     container = _TestContainer(
         use_case=use_case,
         signature_validator=GithubWebhookSignatureValidator(WEBHOOK_SECRET),
+        job_repo=job_repo,
     )
 
     app = create_app()
     app.dependency_overrides[build_container] = lambda: container  # type: ignore[return-value]
 
-    return TestClient(app), queue, repo_repo
+    return TestClient(app), job_repo, repo_repo
 
 
 @pytest.mark.asyncio
-async def test_webhook_pull_request_opened_returns_202_and_enqueues(
-    webhook_setup: tuple[TestClient, InMemoryQueueClient, InMemoryRepoRepository],
+async def test_webhook_pull_request_opened_returns_202_and_persists_job(
+    webhook_setup: tuple[TestClient, InMemoryJobRepository, InMemoryRepoRepository],
 ) -> None:
-    client, queue, repo_repo = webhook_setup
+    client, job_repo, repo_repo = webhook_setup
 
     await repo_repo.upsert(
         UpsertRepositoryParams(
@@ -103,12 +110,11 @@ async def test_webhook_pull_request_opened_returns_202_and_enqueues(
 
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
-    assert len(queue.messages) == 1
-    assert queue.messages[0].job_type.value == "review"
+    assert len(job_repo._jobs) == 1
 
 
 def test_webhook_rejects_invalid_signature(
-    webhook_setup: tuple[TestClient, InMemoryQueueClient, InMemoryRepoRepository],
+    webhook_setup: tuple[TestClient, InMemoryJobRepository, InMemoryRepoRepository],
 ) -> None:
     client, _, _ = webhook_setup
     body = b'{"action":"opened"}'
@@ -125,7 +131,7 @@ def test_webhook_rejects_invalid_signature(
 
 
 def test_webhook_rejects_missing_event_header(
-    webhook_setup: tuple[TestClient, InMemoryQueueClient, InMemoryRepoRepository],
+    webhook_setup: tuple[TestClient, InMemoryJobRepository, InMemoryRepoRepository],
 ) -> None:
     client, _, _ = webhook_setup
     body = b'{"action":"opened"}'

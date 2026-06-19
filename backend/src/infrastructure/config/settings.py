@@ -28,8 +28,10 @@ class Settings(BaseSettings):
     upstash_redis_token: str | None = Field(default=None, alias="UPSTASH_REDIS_TOKEN")
     redis_queue_stream: str = Field(default="review_jobs", alias="REDIS_QUEUE_STREAM")
 
-    worker_wake_url: str | None = Field(default=None, alias="WORKER_WAKE_URL")
-    worker_wake_secret: str = Field(default="", alias="WORKER_WAKE_SECRET")
+    worker_poll_interval_seconds: float = Field(
+        default=5.0, alias="WORKER_POLL_INTERVAL_SECONDS"
+    )
+    worker_stale_running_minutes: int = Field(default=15, alias="WORKER_STALE_RUNNING_MINUTES")
 
     github_app_id: str = Field(default="", alias="GITHUB_APP_ID")
     github_app_private_key_b64: str | None = Field(default=None, alias="GITHUB_APP_PRIVATE_KEY_B64")

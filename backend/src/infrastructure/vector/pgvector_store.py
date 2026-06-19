@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import structlog
-from sqlalchemy import delete, select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from domain.repositories.i_embedding_cleanup_repository import IEmbeddingCleanupRepository
-from infrastructure.db.models.code_embedding import CodeEmbeddingORM
+from domain.services.i_code_embedding_store import ICodeEmbeddingStore
+from infrastructure.ai.gemini_client import EMBEDDING_DIMENSION
 from infrastructure.vector.embedding_service import EmbeddingService
 
 logger = structlog.get_logger()
@@ -32,12 +32,12 @@ class CodeChunkRecord:
     language: str | None
 
 
-class PgvectorStore:
+class PgvectorStore(ICodeEmbeddingStore):
     def __init__(self, session: AsyncSession, embedding_service: EmbeddingService) -> None:
         self._session = session
         self._embedding = embedding_service
 
-    async def store_chunks(
+    async def store_file_chunks(
         self,
         *,
         repository_id: UUID,
@@ -52,69 +52,80 @@ class PgvectorStore:
         Returns the number of chunks stored.
         """
         stored = 0
-        for chunk in chunks:
-            content = str(chunk["content"])
-            vector = await self._embedding.embed_text(content)
-            vector_str = "[" + ",".join(str(v) for v in vector) + "]"
+        vec_type = f"vector({EMBEDDING_DIMENSION})"
+        insert_sql = text(f"""
+            INSERT INTO code_embeddings
+                (repository_id, commit_sha, file_path, chunk_index,
+                 content, embedding, node_type, node_name, language)
+            VALUES
+                (:repo_id, :sha, :path, :idx,
+                 :content, CAST(:vec AS {vec_type}), :node_type, :node_name, :lang)
+            ON CONFLICT (repository_id, commit_sha, file_path, chunk_index)
+            DO UPDATE SET
+                content = EXCLUDED.content,
+                embedding = EXCLUDED.embedding
+        """)
+        try:
+            for chunk in chunks:
+                content = str(chunk["content"]).strip()
+                if not content:
+                    continue
+                vector = await self._embedding.embed_text(content)
+                vector_str = "[" + ",".join(str(v) for v in vector) + "]"
 
-            # Upsert via raw SQL to handle the VECTOR type cleanly
-            await self._session.execute(
-                text("""
-                    INSERT INTO code_embeddings
-                        (repository_id, commit_sha, file_path, chunk_index,
-                         content, embedding, node_type, node_name, language)
-                    VALUES
-                        (:repo_id, :sha, :path, :idx,
-                         :content, :vec::vector(768), :node_type, :node_name, :lang)
-                    ON CONFLICT (repository_id, commit_sha, file_path, chunk_index)
-                    DO UPDATE SET
-                        content = EXCLUDED.content,
-                        embedding = EXCLUDED.embedding
-                """),
-                {
-                    "repo_id": str(repository_id),
-                    "sha": commit_sha,
-                    "path": file_path,
-                    "idx": int(chunk.get("chunk_index", stored)),
-                    "content": content,
-                    "vec": vector_str,
-                    "node_type": chunk.get("node_type"),
-                    "node_name": chunk.get("node_name"),
-                    "lang": language,
-                },
-            )
-            stored += 1
+                await self._session.execute(
+                    insert_sql,
+                    {
+                        "repo_id": str(repository_id),
+                        "sha": commit_sha,
+                        "path": file_path,
+                        "idx": int(chunk.get("chunk_index", stored)),
+                        "content": content,
+                        "vec": vector_str,
+                        "node_type": chunk.get("node_type"),
+                        "node_name": chunk.get("node_name"),
+                        "lang": language,
+                    },
+                )
+                stored += 1
 
-        await self._session.commit()
+            await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            raise
         return stored
 
     async def retrieve_similar(
         self,
         *,
         repository_id: UUID,
+        commit_sha: str,
         query_text: str,
         k: int = 5,
         language: str | None = None,
     ) -> list[str]:
         """
         Return the top-k most similar chunk contents to the query text.
-        Uses cosine similarity (<=> operator).
+        Scoped to a single commit SHA. Uses cosine similarity (<=> operator).
         """
-        query_vector = await self._embedding.embed_text(query_text)
+        query_vector = await self._embedding.embed_query(query_text)
         vector_str = "[" + ",".join(str(v) for v in query_vector) + "]"
 
         lang_filter = "AND language = :lang" if language else ""
+        vec_type = f"vector({EMBEDDING_DIMENSION})"
         raw = await self._session.execute(
             text(f"""
                 SELECT content
                 FROM code_embeddings
                 WHERE repository_id = :repo_id
+                  AND commit_sha = :sha
                 {lang_filter}
-                ORDER BY embedding <=> :vec::vector(768)
+                ORDER BY embedding <=> CAST(:vec AS {vec_type})
                 LIMIT :k
             """),
             {
                 "repo_id": str(repository_id),
+                "sha": commit_sha,
                 "vec": vector_str,
                 "k": k,
                 **({"lang": language} if language else {}),

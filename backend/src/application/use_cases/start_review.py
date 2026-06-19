@@ -4,25 +4,21 @@ from domain.entities.job import ReviewJob
 from domain.errors import EntityNotFoundError
 from domain.repositories.i_job_repository import CreateReviewJobParams, IJobRepository
 from domain.repositories.i_repo_repository import IRepoRepository
-from domain.services.i_queue_client import IQueueClient, QueueMessage
 from domain.value_objects.job_status import JobStatus
-from domain.value_objects.job_type import JobType
 
 logger = structlog.get_logger()
 
 
 class StartReviewUseCase:
-    """Enqueue a review job for a pull request event."""
+    """Create a pending review job in Postgres for the worker to poll."""
 
     def __init__(
         self,
         job_repo: IJobRepository,
         repo_repo: IRepoRepository,
-        queue: IQueueClient,
     ) -> None:
         self._job_repo = job_repo
         self._repo_repo = repo_repo
-        self._queue = queue
 
     async def execute(
         self,
@@ -36,7 +32,7 @@ class StartReviewUseCase:
         head_sha: str,
     ) -> tuple[ReviewJob | None, bool]:
         """
-        Create review job and enqueue to Redis.
+        Create review job in the database.
 
         Returns (job, enqueued) where enqueued=False when idempotent skip applies.
         """
@@ -74,22 +70,12 @@ class StartReviewUseCase:
             )
         )
 
-        await self._queue.enqueue(
-            QueueMessage(
-                job_type=JobType.REVIEW,
-                job_id=job.id,
-                repository_id=repo.id,
-                head_sha=head_sha,
-                pr_number=pr_number,
-            )
-        )
-
         log = logger.bind(
             job_id=str(job.id),
             repo=repo.full_name,
             pr_number=pr_number,
             head_sha=head_sha,
         )
-        await log.ainfo("review_job_enqueued")
+        await log.ainfo("review_job_enqueued", status=JobStatus.PENDING.value)
 
         return job, True

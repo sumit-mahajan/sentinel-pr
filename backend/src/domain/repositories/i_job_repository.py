@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from datetime import datetime
 from uuid import UUID
 
 from domain.entities.job import ReviewJob
@@ -56,3 +57,21 @@ class IJobRepository(ABC):
     @abstractmethod
     async def update_attempt_count(self, job_id: UUID, attempt_count: int) -> ReviewJob:
         """Increment attempt_count before each execution attempt."""
+
+    @abstractmethod
+    async def claim_next_pending(self, max_attempts: int) -> ReviewJob | None:
+        """Atomically claim the oldest eligible pending review job."""
+
+    @abstractmethod
+    async def release_stale_running(self, stale_minutes: int, max_attempts: int) -> int:
+        """Reset crashed running jobs to pending. Returns rows updated."""
+
+    @abstractmethod
+    async def schedule_retry(
+        self,
+        job_id: UUID,
+        *,
+        retry_after: datetime,
+        error_message: str,
+    ) -> ReviewJob:
+        """Mark job pending with a future retry_after timestamp."""

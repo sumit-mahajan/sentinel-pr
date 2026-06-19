@@ -1,10 +1,15 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from domain.entities.embedding_cleanup_job import EmbeddingCleanupJob
 from domain.entities.github_installation import GithubInstallation
 from domain.entities.job import ReviewJob
 from domain.entities.repository import Repository
 from domain.errors import EntityNotFoundError
+from domain.repositories.i_embedding_cleanup_job_repository import (
+    CreateEmbeddingCleanupJobParams,
+    IEmbeddingCleanupJobRepository,
+)
 from domain.repositories.i_embedding_cleanup_repository import IEmbeddingCleanupRepository
 from domain.repositories.i_installation_repository import (
     IInstallationRepository,
@@ -108,6 +113,7 @@ class InMemoryJobRepository(IJobRepository):
             head_sha=params.head_sha,
             status=JobStatus.PENDING,
             attempt_count=0,
+            retry_after=None,
             error_message=None,
             enqueued_at=now,
             started_at=None,
@@ -138,6 +144,7 @@ class InMemoryJobRepository(IJobRepository):
                     head_sha=job.head_sha,
                     status=job.status,
                     attempt_count=attempt_count,
+                    retry_after=job.retry_after,
                     error_message=job.error_message,
                     enqueued_at=job.enqueued_at,
                     started_at=job.started_at,
@@ -158,6 +165,12 @@ class InMemoryJobRepository(IJobRepository):
     ) -> ReviewJob:
         for key, job in self._jobs.items():
             if job.id == job_id:
+                started_at = job.started_at
+                completed_at = job.completed_at
+                if status == JobStatus.RUNNING and started_at is None:
+                    started_at = datetime.now(UTC)
+                if status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+                    completed_at = datetime.now(UTC)
                 updated = ReviewJob(
                     id=job.id,
                     repository_id=job.repository_id,
@@ -169,10 +182,89 @@ class InMemoryJobRepository(IJobRepository):
                     head_sha=job.head_sha,
                     status=status,
                     attempt_count=job.attempt_count,
+                    retry_after=job.retry_after,
                     error_message=error_message,
                     enqueued_at=job.enqueued_at,
-                    started_at=job.started_at,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    created_at=job.created_at,
+                    updated_at=datetime.now(UTC),
+                )
+                self._jobs[key] = updated
+                return updated
+        raise EntityNotFoundError(f"Review job {job_id} not found")
+
+    async def claim_next_pending(self, max_attempts: int) -> ReviewJob | None:
+        now = datetime.now(UTC)
+        eligible = [
+            job
+            for job in self._jobs.values()
+            if job.status == JobStatus.PENDING
+            and job.attempt_count < max_attempts
+            and (job.retry_after is None or job.retry_after <= now)
+        ]
+        if not eligible:
+            return None
+        job = sorted(eligible, key=lambda item: item.enqueued_at)[0]
+        return await self.update_status(job.id, JobStatus.RUNNING)
+
+    async def release_stale_running(self, stale_minutes: int, max_attempts: int) -> int:
+        cutoff = datetime.now(UTC) - timedelta(minutes=stale_minutes)
+        released = 0
+        for key, job in list(self._jobs.items()):
+            if (
+                job.status == JobStatus.RUNNING
+                and job.started_at is not None
+                and job.started_at < cutoff
+                and job.attempt_count < max_attempts
+            ):
+                self._jobs[key] = ReviewJob(
+                    id=job.id,
+                    repository_id=job.repository_id,
+                    pr_number=job.pr_number,
+                    pr_title=job.pr_title,
+                    pr_author=job.pr_author,
+                    pr_url=job.pr_url,
+                    base_sha=job.base_sha,
+                    head_sha=job.head_sha,
+                    status=JobStatus.PENDING,
+                    attempt_count=job.attempt_count,
+                    retry_after=job.retry_after,
+                    error_message=job.error_message,
+                    enqueued_at=job.enqueued_at,
+                    started_at=None,
                     completed_at=job.completed_at,
+                    created_at=job.created_at,
+                    updated_at=datetime.now(UTC),
+                )
+                released += 1
+        return released
+
+    async def schedule_retry(
+        self,
+        job_id: UUID,
+        *,
+        retry_after: datetime,
+        error_message: str,
+    ) -> ReviewJob:
+        for key, job in self._jobs.items():
+            if job.id == job_id:
+                updated = ReviewJob(
+                    id=job.id,
+                    repository_id=job.repository_id,
+                    pr_number=job.pr_number,
+                    pr_title=job.pr_title,
+                    pr_author=job.pr_author,
+                    pr_url=job.pr_url,
+                    base_sha=job.base_sha,
+                    head_sha=job.head_sha,
+                    status=JobStatus.PENDING,
+                    attempt_count=job.attempt_count,
+                    retry_after=retry_after,
+                    error_message=error_message,
+                    enqueued_at=job.enqueued_at,
+                    started_at=None,
+                    completed_at=None,
                     created_at=job.created_at,
                     updated_at=datetime.now(UTC),
                 )
@@ -263,3 +355,134 @@ class InMemoryEmbeddingCleanupRepository(IEmbeddingCleanupRepository):
     async def delete_older_than_days(self, days: int) -> int:
         self.stale_calls.append(days)
         return 10  # simulate deleting 10 stale rows
+
+
+class InMemoryEmbeddingCleanupJobRepository(IEmbeddingCleanupJobRepository):
+    def __init__(self) -> None:
+        self._jobs: dict[tuple[UUID, str], EmbeddingCleanupJob] = {}
+
+    async def get_by_repo_and_head_sha(
+        self, repository_id: UUID, head_sha: str
+    ) -> EmbeddingCleanupJob | None:
+        return self._jobs.get((repository_id, head_sha))
+
+    async def create(self, params: CreateEmbeddingCleanupJobParams) -> EmbeddingCleanupJob:
+        now = datetime.now(UTC)
+        job = EmbeddingCleanupJob(
+            id=uuid4(),
+            repository_id=params.repository_id,
+            head_sha=params.head_sha,
+            pr_number=params.pr_number,
+            status=JobStatus.PENDING,
+            attempt_count=0,
+            retry_after=None,
+            error_message=None,
+            enqueued_at=now,
+            started_at=None,
+            completed_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._jobs[(params.repository_id, params.head_sha)] = job
+        return job
+
+    async def get_by_id(self, job_id: UUID) -> EmbeddingCleanupJob | None:
+        for job in self._jobs.values():
+            if job.id == job_id:
+                return job
+        return None
+
+    async def claim_next_pending(self, max_attempts: int) -> EmbeddingCleanupJob | None:
+        now = datetime.now(UTC)
+        eligible = [
+            job
+            for job in self._jobs.values()
+            if job.status == JobStatus.PENDING
+            and job.attempt_count < max_attempts
+            and (job.retry_after is None or job.retry_after <= now)
+        ]
+        if not eligible:
+            return None
+        job = sorted(eligible, key=lambda item: item.enqueued_at)[0]
+        return await self.update_status(job.id, JobStatus.RUNNING)
+
+    async def release_stale_running(self, stale_minutes: int, max_attempts: int) -> int:
+        return 0
+
+    async def update_attempt_count(self, job_id: UUID, attempt_count: int) -> EmbeddingCleanupJob:
+        for key, job in self._jobs.items():
+            if job.id == job_id:
+                updated = EmbeddingCleanupJob(
+                    id=job.id,
+                    repository_id=job.repository_id,
+                    head_sha=job.head_sha,
+                    pr_number=job.pr_number,
+                    status=job.status,
+                    attempt_count=attempt_count,
+                    retry_after=job.retry_after,
+                    error_message=job.error_message,
+                    enqueued_at=job.enqueued_at,
+                    started_at=job.started_at,
+                    completed_at=job.completed_at,
+                    created_at=job.created_at,
+                    updated_at=datetime.now(UTC),
+                )
+                self._jobs[key] = updated
+                return updated
+        raise EntityNotFoundError(f"Embedding cleanup job {job_id} not found")
+
+    async def update_status(
+        self,
+        job_id: UUID,
+        status: JobStatus,
+        *,
+        error_message: str | None = None,
+    ) -> EmbeddingCleanupJob:
+        for key, job in self._jobs.items():
+            if job.id == job_id:
+                updated = EmbeddingCleanupJob(
+                    id=job.id,
+                    repository_id=job.repository_id,
+                    head_sha=job.head_sha,
+                    pr_number=job.pr_number,
+                    status=status,
+                    attempt_count=job.attempt_count,
+                    retry_after=job.retry_after,
+                    error_message=error_message,
+                    enqueued_at=job.enqueued_at,
+                    started_at=job.started_at,
+                    completed_at=job.completed_at,
+                    created_at=job.created_at,
+                    updated_at=datetime.now(UTC),
+                )
+                self._jobs[key] = updated
+                return updated
+        raise EntityNotFoundError(f"Embedding cleanup job {job_id} not found")
+
+    async def schedule_retry(
+        self,
+        job_id: UUID,
+        *,
+        retry_after: datetime,
+        error_message: str,
+    ) -> EmbeddingCleanupJob:
+        for key, job in self._jobs.items():
+            if job.id == job_id:
+                updated = EmbeddingCleanupJob(
+                    id=job.id,
+                    repository_id=job.repository_id,
+                    head_sha=job.head_sha,
+                    pr_number=job.pr_number,
+                    status=JobStatus.PENDING,
+                    attempt_count=job.attempt_count,
+                    retry_after=retry_after,
+                    error_message=error_message,
+                    enqueued_at=job.enqueued_at,
+                    started_at=None,
+                    completed_at=None,
+                    created_at=job.created_at,
+                    updated_at=datetime.now(UTC),
+                )
+                self._jobs[key] = updated
+                return updated
+        raise EntityNotFoundError(f"Embedding cleanup job {job_id} not found")

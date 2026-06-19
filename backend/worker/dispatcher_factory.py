@@ -1,13 +1,22 @@
 """Build WorkerDispatcher with infrastructure dependencies."""
 
+from uuid import UUID
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from application.use_cases.cleanup_embeddings import CleanupEmbeddingsUseCase
 from application.use_cases.persist_review import PersistReviewUseCase
 from application.use_cases.post_review_to_github import PostReviewToGithubUseCase
+from application.use_cases.run_embedding_cleanup_job import RunEmbeddingCleanupJobUseCase
 from application.use_cases.run_review_pipeline import RunReviewPipelineUseCase
 from infrastructure.ai.orchestrator_factory import build_orchestrator
 from infrastructure.config.settings import Settings
+from infrastructure.db.repositories.embedding_cleanup_job_repository import (
+    PostgresEmbeddingCleanupJobRepository,
+)
+from infrastructure.db.repositories.embedding_cleanup_repository import (
+    PostgresEmbeddingCleanupRepository,
+)
 from infrastructure.db.repositories.installation_repository import PostgresInstallationRepository
 from infrastructure.db.repositories.job_repository import PostgresJobRepository
 from infrastructure.db.repositories.repo_repository import PostgresRepoRepository
@@ -15,12 +24,13 @@ from infrastructure.db.repositories.review_repository import PostgresReviewRepos
 from infrastructure.db.session import create_session_factory
 from infrastructure.github.app_client import GithubAppClient
 from infrastructure.github.comment_poster import GithubCommentPoster
+from infrastructure.github.pr_fetcher import GitHubPrFetcher
 from infrastructure.worker.dispatcher import WorkerDispatcher
-from tests.support.memory_repositories import InMemoryEmbeddingCleanupRepository
 
 
 def _build_worker_dispatcher(db: AsyncSession, settings: Settings) -> WorkerDispatcher:
     job_repo = PostgresJobRepository(db)
+    cleanup_job_repo = PostgresEmbeddingCleanupJobRepository(db)
     review_repo = PostgresReviewRepository(db)
     repo_repo = PostgresRepoRepository(db)
     installation_repo = PostgresInstallationRepository(db)
@@ -42,6 +52,7 @@ def _build_worker_dispatcher(db: AsyncSession, settings: Settings) -> WorkerDisp
             repo_repo,
             installation_repo,
             comment_poster,
+            pr_fetcher=GitHubPrFetcher(app_client),
         )
 
     run_review = RunReviewPipelineUseCase(
@@ -50,13 +61,28 @@ def _build_worker_dispatcher(db: AsyncSession, settings: Settings) -> WorkerDisp
         persist_review=persist_review,
         post_to_github=post_to_github,
     )
-    cleanup_use_case = CleanupEmbeddingsUseCase(InMemoryEmbeddingCleanupRepository())
+    cleanup_use_case = CleanupEmbeddingsUseCase(PostgresEmbeddingCleanupRepository(db))
+    run_cleanup_job = RunEmbeddingCleanupJobUseCase(cleanup_job_repo, cleanup_use_case)
 
-    return WorkerDispatcher(run_review, cleanup_use_case)
+    return WorkerDispatcher(run_review, cleanup_use_case, run_cleanup_job)
+
+
+async def dispatch_review_job(settings: Settings, job_id: UUID) -> None:
+    session_factory = create_session_factory(settings)
+    async with session_factory() as db:
+        dispatcher = _build_worker_dispatcher(db, settings)
+        await dispatcher.dispatch_review_job(job_id)
+
+
+async def dispatch_cleanup_job(settings: Settings, cleanup_job_id: UUID) -> None:
+    session_factory = create_session_factory(settings)
+    async with session_factory() as db:
+        dispatcher = _build_worker_dispatcher(db, settings)
+        await dispatcher.dispatch_cleanup_job(cleanup_job_id)
 
 
 async def dispatch_payload(settings: Settings, raw_payload: str) -> bool:
-    """Open a DB session for the duration of dispatch (session must stay open)."""
+    """Legacy Redis payload dispatch — kept for backward compatibility."""
     session_factory = create_session_factory(settings)
     async with session_factory() as db:
         dispatcher = _build_worker_dispatcher(db, settings)

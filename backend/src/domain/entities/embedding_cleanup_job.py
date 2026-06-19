@@ -6,15 +6,11 @@ from domain.value_objects.job_status import JobStatus
 
 
 @dataclass
-class ReviewJob:
+class EmbeddingCleanupJob:
     id: UUID
     repository_id: UUID
-    pr_number: int
-    pr_title: str
-    pr_author: str
-    pr_url: str
-    base_sha: str
     head_sha: str
+    pr_number: int
     status: JobStatus
     attempt_count: int
     retry_after: datetime | None
